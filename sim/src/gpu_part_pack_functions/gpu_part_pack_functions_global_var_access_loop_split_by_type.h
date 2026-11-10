@@ -33,6 +33,7 @@
 
 #include "active.h"
 #include "cell.h"
+#include "gpu_part_buffer_access.h"
 #include "gpu_part_structs.h"
 #include "hydro_part.h"
 
@@ -51,13 +52,12 @@
  * @param e the #engine
  */
 __attribute__((always_inline)) INLINE static void gpu_unpack_part_density(
-    struct cell* restrict c,
-    const struct gpu_part_recv_d* restrict parts_buffer, const int unpack_ind,
-    const int count, const struct engine* restrict e) {
+    struct cell* restrict c, const gpu_recv_d_buf parts_buffer,
+    const int unpack_ind, const int count, const struct engine* restrict e) {
 
   const ptrdiff_t first =
       c->hydro.part_arrs._part - global_hydro_part_arrays._part;
-  const struct gpu_part_recv_d* restrict parts_recv = &parts_buffer[unpack_ind];
+  const gpu_recv_d_buf parts_recv = gpu_recv_d_offset(parts_buffer, unpack_ind);
 
 #ifdef VECTORIZE
 #pragma omp simd
@@ -67,27 +67,28 @@ __attribute__((always_inline)) INLINE static void gpu_unpack_part_density(
 
     if (!part_is_active_global(pi, e)) continue;
 
-    struct gpu_part_recv_d pr = parts_recv[i];
-
-    float rho = part_get_rho_global(pi) + pr.rho_rhodh_wcount_wcount_dh.x;
+    float rho = part_get_rho_global(pi) + gpu_recv_d_get_rho(parts_recv, i);
     part_set_rho_global(pi, rho);
 
-    float rho_dh = part_get_rho_dh_global(pi) + pr.rho_rhodh_wcount_wcount_dh.y;
+    float rho_dh =
+        part_get_rho_dh_global(pi) + gpu_recv_d_get_rho_dh(parts_recv, i);
     part_set_rho_dh_global(pi, rho_dh);
 
-    float wcount = part_get_wcount_global(pi) + pr.rho_rhodh_wcount_wcount_dh.z;
+    float wcount =
+        part_get_wcount_global(pi) + gpu_recv_d_get_wcount(parts_recv, i);
     part_set_wcount_global(pi, wcount);
 
     float wcount_dh =
-        part_get_wcount_dh_global(pi) + pr.rho_rhodh_wcount_wcount_dh.w;
+        part_get_wcount_dh_global(pi) + gpu_recv_d_get_wcount_dh(parts_recv, i);
     part_set_wcount_dh_global(pi, wcount_dh);
 
     float* rot_v = part_get_rot_v_global(pi);
-    rot_v[0] += pr.rot_vx_div_v.x;
-    rot_v[1] += pr.rot_vx_div_v.y;
-    rot_v[2] += pr.rot_vx_div_v.z;
+    rot_v[0] += gpu_recv_d_get_rot_vx(parts_recv, i);
+    rot_v[1] += gpu_recv_d_get_rot_vy(parts_recv, i);
+    rot_v[2] += gpu_recv_d_get_rot_vz(parts_recv, i);
 
-    float div_v = part_get_div_v_global(pi) + pr.rot_vx_div_v.w;
+    float div_v =
+        part_get_div_v_global(pi) + gpu_recv_d_get_div_v(parts_recv, i);
     part_set_div_v_global(pi, div_v);
   }
 }
@@ -102,13 +103,12 @@ __attribute__((always_inline)) INLINE static void gpu_unpack_part_density(
  * @param e the #engine
  */
 __attribute__((always_inline)) INLINE static void gpu_unpack_part_gradient(
-    struct cell* restrict c,
-    const struct gpu_part_recv_g* restrict parts_buffer, const int unpack_ind,
-    const int count, const struct engine* e) {
+    struct cell* restrict c, const gpu_recv_g_buf parts_buffer,
+    const int unpack_ind, const int count, const struct engine* e) {
 
   const ptrdiff_t first =
       c->hydro.part_arrs._part - global_hydro_part_arrays._part;
-  const struct gpu_part_recv_g* restrict parts_recv = &parts_buffer[unpack_ind];
+  const gpu_recv_g_buf parts_recv = gpu_recv_g_offset(parts_buffer, unpack_ind);
 
 #ifdef VECTORIZE
 #pragma omp simd
@@ -118,16 +118,17 @@ __attribute__((always_inline)) INLINE static void gpu_unpack_part_gradient(
 
     if (!part_is_active_global(pi, e)) continue;
 
-    struct gpu_part_recv_g pr = parts_recv[i];
-
     float avisc_old = part_get_alpha_visc_max_ngb_global(pi);
-    float avisc = fmaxf(avisc_old, pr.aviscmax_vsig_lapu.x);
+    float avisc =
+        fmaxf(avisc_old, gpu_recv_g_get_alpha_visc_max_ngb(parts_recv, i));
     part_set_alpha_visc_max_ngb_global(pi, avisc);
 
-    float vsig = fmaxf(pr.aviscmax_vsig_lapu.y, part_get_v_sig_global(pi));
+    float vsig =
+        fmaxf(gpu_recv_g_get_v_sig(parts_recv, i), part_get_v_sig_global(pi));
     part_set_v_sig_global(pi, vsig);
 
-    float lu = pr.aviscmax_vsig_lapu.z + part_get_laplace_u_global(pi);
+    float lu =
+        gpu_recv_g_get_laplace_u(parts_recv, i) + part_get_laplace_u_global(pi);
     part_set_laplace_u_global(pi, lu);
   }
 }
@@ -142,13 +143,12 @@ __attribute__((always_inline)) INLINE static void gpu_unpack_part_gradient(
  * @param e the #engine
  */
 __attribute__((always_inline)) INLINE static void gpu_unpack_part_force(
-    struct cell* restrict c,
-    const struct gpu_part_recv_f* restrict parts_buffer, const int unpack_ind,
-    const int count, const struct engine* e) {
+    struct cell* restrict c, const gpu_recv_f_buf parts_buffer,
+    const int unpack_ind, const int count, const struct engine* e) {
 
   const ptrdiff_t first =
       c->hydro.part_arrs._part - global_hydro_part_arrays._part;
-  const struct gpu_part_recv_f* restrict parts_recv = &parts_buffer[unpack_ind];
+  const gpu_recv_f_buf parts_recv = gpu_recv_f_offset(parts_buffer, unpack_ind);
 
 #ifdef VECTORIZE
 #pragma omp simd
@@ -158,17 +158,15 @@ __attribute__((always_inline)) INLINE static void gpu_unpack_part_force(
 
     if (!part_is_active_global(pi, e)) continue;
 
-    struct gpu_part_recv_f pr = parts_recv[i];
-
     float* a = part_get_a_hydro_global(pi);
-    a[0] += pr.a_hydro.x;
-    a[1] += pr.a_hydro.y;
-    a[2] += pr.a_hydro.z;
+    a[0] += gpu_recv_f_get_a_x(parts_recv, i);
+    a[1] += gpu_recv_f_get_a_y(parts_recv, i);
+    a[2] += gpu_recv_f_get_a_z(parts_recv, i);
 
-    float u_dt = pr.udt_hdt_minngbtb.x + part_get_u_dt_global(pi);
+    float u_dt = gpu_recv_f_get_u_dt(parts_recv, i) + part_get_u_dt_global(pi);
     part_set_u_dt_global(pi, u_dt);
 
-    float h_dt = pr.udt_hdt_minngbtb.y + part_get_h_dt_global(pi);
+    float h_dt = gpu_recv_f_get_h_dt(parts_recv, i) + part_get_h_dt_global(pi);
     part_set_h_dt_global(pi, h_dt);
   }
 
@@ -180,9 +178,8 @@ __attribute__((always_inline)) INLINE static void gpu_unpack_part_force(
 
     if (!part_is_active_global(pi, e)) continue;
 
-    struct gpu_part_recv_f pr = parts_recv[i];
-
-    timebin_t mintbin = (timebin_t)(pr.udt_hdt_minngbtb.z + 0.5f);
+    timebin_t mintbin =
+        (timebin_t)(gpu_recv_f_get_min_ngb_time_bin(parts_recv, i) + 0.5f);
     part_set_timestep_limiter_min_ngb_time_bin_global(pi, mintbin);
   }
 }
@@ -201,15 +198,15 @@ __attribute__((always_inline)) INLINE static void gpu_unpack_part_force(
  * interacted with) in buffer
  */
 __attribute__((always_inline)) INLINE static void gpu_pack_part_density(
-    const struct cell* restrict c,
-    struct gpu_part_send_d* restrict parts_buffer, const int pack_ind,
-    const double shift[3], const int cjstart, const int cjend) {
+    const struct cell* restrict c, const gpu_send_d_buf parts_buffer,
+    const int pack_ind, const double shift[3], const int cjstart,
+    const int cjend) {
 
   /* Grab handles */
   const int count = c->hydro.count;
   const ptrdiff_t first =
       c->hydro.part_arrs._part - global_hydro_part_arrays._part;
-  struct gpu_part_send_d* restrict ps = &parts_buffer[pack_ind];
+  const gpu_send_d_buf ps = gpu_send_d_offset(parts_buffer, pack_ind);
 
 #ifdef VECTORIZE
 #pragma omp simd
@@ -218,9 +215,9 @@ __attribute__((always_inline)) INLINE static void gpu_pack_part_density(
     ptrdiff_t pi = i + first;
 
     const double* x = part_get_const_x_global(pi);
-    ps[i].x_h.x = x[0] - shift[0];
-    ps[i].x_h.y = x[1] - shift[1];
-    ps[i].x_h.z = x[2] - shift[2];
+    gpu_send_d_set_x(ps, i, x[0] - shift[0]);
+    gpu_send_d_set_y(ps, i, x[1] - shift[1]);
+    gpu_send_d_set_z(ps, i, x[2] - shift[2]);
   }
 
 #ifdef VECTORIZE
@@ -229,21 +226,21 @@ __attribute__((always_inline)) INLINE static void gpu_pack_part_density(
   for (ptrdiff_t i = 0; i < count; i++) {
     ptrdiff_t pi = i + first;
 
-    ps[i].x_h.w = part_get_h_global(pi);
+    gpu_send_d_set_h(ps, i, part_get_h_global(pi));
 
     const float* v = part_get_const_v_global(pi);
-    ps[i].vx_m.x = v[0];
-    ps[i].vx_m.y = v[1];
-    ps[i].vx_m.z = v[2];
-    ps[i].vx_m.w = part_get_mass_global(pi);
+    gpu_send_d_set_vx(ps, i, v[0]);
+    gpu_send_d_set_vy(ps, i, v[1]);
+    gpu_send_d_set_vz(ps, i, v[2]);
+    gpu_send_d_set_m(ps, i, part_get_mass_global(pi));
   }
 
 #ifdef VECTORIZE
 #pragma omp simd
 #endif
   for (ptrdiff_t i = 0; i < count; i++) {
-    ps[i].pjs_pje.x = cjstart;
-    ps[i].pjs_pje.y = cjend;
+    gpu_send_d_set_pjs(ps, i, cjstart);
+    gpu_send_d_set_pje(ps, i, cjend);
   }
 }
 
@@ -261,15 +258,15 @@ __attribute__((always_inline)) INLINE static void gpu_pack_part_density(
  * interacted with) in buffer
  */
 __attribute__((always_inline)) INLINE static void gpu_pack_part_gradient(
-    const struct cell* restrict ci,
-    struct gpu_part_send_g* restrict parts_buffer, const int pack_ind,
-    const double shift[3], const int cjstart, const int cjend) {
+    const struct cell* restrict ci, const gpu_send_g_buf parts_buffer,
+    const int pack_ind, const double shift[3], const int cjstart,
+    const int cjend) {
 
   /* Grab handles */
   const ptrdiff_t first =
       ci->hydro.part_arrs._part - global_hydro_part_arrays._part;
   const int count = ci->hydro.count;
-  struct gpu_part_send_g* restrict ps = &parts_buffer[pack_ind];
+  const gpu_send_g_buf ps = gpu_send_g_offset(parts_buffer, pack_ind);
 
 #ifdef VECTORIZE
 #pragma omp simd
@@ -278,9 +275,9 @@ __attribute__((always_inline)) INLINE static void gpu_pack_part_gradient(
     ptrdiff_t pi = i + first;
 
     const double* x = part_get_const_x_global(pi);
-    ps[i].x_h.x = x[0] - shift[0];
-    ps[i].x_h.y = x[1] - shift[1];
-    ps[i].x_h.z = x[2] - shift[2];
+    gpu_send_g_set_x(ps, i, x[0] - shift[0]);
+    gpu_send_g_set_y(ps, i, x[1] - shift[1]);
+    gpu_send_g_set_z(ps, i, x[2] - shift[2]);
   }
 
 #ifdef VECTORIZE
@@ -289,35 +286,37 @@ __attribute__((always_inline)) INLINE static void gpu_pack_part_gradient(
   for (ptrdiff_t i = 0; i < count; i++) {
     ptrdiff_t pi = i + first;
 
-    ps[i].x_h.w = part_get_h_global(pi);
+    gpu_send_g_set_h(ps, i, part_get_h_global(pi));
 
     const float* v = part_get_const_v_global(pi);
-    ps[i].vx_m.x = v[0];
-    ps[i].vx_m.y = v[1];
-    ps[i].vx_m.z = v[2];
-    ps[i].vx_m.w = part_get_mass_global(pi);
+    gpu_send_g_set_vx(ps, i, v[0]);
+    gpu_send_g_set_vy(ps, i, v[1]);
+    gpu_send_g_set_vz(ps, i, v[2]);
+    gpu_send_g_set_m(ps, i, part_get_mass_global(pi));
 
 #if defined(SPHENIX_PACK_FORCE_PARTICLE) || \
     defined(SPHENIX_PACK_SHARED_PARTICLE) || \
     defined(SPHENIX_PACK_SHARED_TYPE_PARTICLE) || \
     defined(SPHENIX_PACK_FORCE_TYPE_PARTICLE)
-    ps[i].u_rho_c_avisc.x = part_get_u_global(pi);
-    ps[i].u_rho_c_avisc.y = part_get_rho_global(pi);
-    ps[i].u_rho_c_avisc.z = part_get_soundspeed_global(pi);
-    ps[i].u_rho_c_avisc.w = part_get_alpha_av_global(pi);
+    gpu_send_g_set_u(ps, i, part_get_u_global(pi));
+    gpu_send_g_set_rho(ps, i, part_get_rho_global(pi));
+    gpu_send_g_set_c(ps, i, part_get_soundspeed_global(pi));
+    gpu_send_g_set_alpha_visc(ps, i, part_get_alpha_av_global(pi));
 
-    ps[i].aviscmax_vsig_lapu.x = part_get_alpha_visc_max_ngb_global(pi);
-    ps[i].aviscmax_vsig_lapu.y = part_get_v_sig_global(pi);
-    ps[i].aviscmax_vsig_lapu.z = part_get_laplace_u_global(pi);
+    gpu_send_g_set_alpha_visc_max_ngb(ps, i,
+                                      part_get_alpha_visc_max_ngb_global(pi));
+    gpu_send_g_set_v_sig(ps, i, part_get_v_sig_global(pi));
+    gpu_send_g_set_laplace_u(ps, i, part_get_laplace_u_global(pi));
 #else
-    ps[i].u_rho_c_aviscmax.x = part_get_u_global(pi);
-    ps[i].u_rho_c_aviscmax.y = part_get_rho_global(pi);
-    ps[i].u_rho_c_aviscmax.z = part_get_soundspeed_global(pi);
-    ps[i].u_rho_c_aviscmax.w = part_get_alpha_visc_max_ngb_global(pi);
+    gpu_send_g_set_u(ps, i, part_get_u_global(pi));
+    gpu_send_g_set_rho(ps, i, part_get_rho_global(pi));
+    gpu_send_g_set_c(ps, i, part_get_soundspeed_global(pi));
+    gpu_send_g_set_alpha_visc_max_ngb(ps, i,
+                                      part_get_alpha_visc_max_ngb_global(pi));
 
-    ps[i].avisc_vsig_lapu.x = part_get_alpha_av_global(pi);
-    ps[i].avisc_vsig_lapu.y = part_get_v_sig_global(pi);
-    ps[i].avisc_vsig_lapu.z = part_get_laplace_u_global(pi);
+    gpu_send_g_set_alpha_visc(ps, i, part_get_alpha_av_global(pi));
+    gpu_send_g_set_v_sig(ps, i, part_get_v_sig_global(pi));
+    gpu_send_g_set_laplace_u(ps, i, part_get_laplace_u_global(pi));
 #endif
   }
 
@@ -325,8 +324,8 @@ __attribute__((always_inline)) INLINE static void gpu_pack_part_gradient(
 #pragma omp simd
 #endif
   for (ptrdiff_t i = 0; i < count; i++) {
-    ps[i].pjs_pje.x = cjstart;
-    ps[i].pjs_pje.y = cjend;
+    gpu_send_g_set_pjs(ps, i, cjstart);
+    gpu_send_g_set_pje(ps, i, cjend);
   }
 }
 
@@ -344,14 +343,14 @@ __attribute__((always_inline)) INLINE static void gpu_pack_part_gradient(
  * interacted with) in buffer
  */
 __attribute__((always_inline)) INLINE static void gpu_pack_part_force(
-    const struct cell* restrict ci,
-    struct gpu_part_send_f* restrict parts_buffer, const int pack_ind,
-    const double shift[3], const int cjstart, const int cjend) {
+    const struct cell* restrict ci, const gpu_send_f_buf parts_buffer,
+    const int pack_ind, const double shift[3], const int cjstart,
+    const int cjend) {
 
   const int count = ci->hydro.count;
   const ptrdiff_t first =
       ci->hydro.part_arrs._part - global_hydro_part_arrays._part;
-  struct gpu_part_send_f* restrict ps = &parts_buffer[pack_ind];
+  const gpu_send_f_buf ps = gpu_send_f_offset(parts_buffer, pack_ind);
 
 #ifdef VECTORIZE
 #pragma omp simd
@@ -360,9 +359,9 @@ __attribute__((always_inline)) INLINE static void gpu_pack_part_force(
     ptrdiff_t pi = i + first;
 
     const double* x = part_get_const_x_global(pi);
-    ps[i].x_h.x = x[0] - shift[0];
-    ps[i].x_h.y = x[1] - shift[1];
-    ps[i].x_h.z = x[2] - shift[2];
+    gpu_send_f_set_x(ps, i, x[0] - shift[0]);
+    gpu_send_f_set_y(ps, i, x[1] - shift[1]);
+    gpu_send_f_set_z(ps, i, x[2] - shift[2]);
   }
 
 #ifdef VECTORIZE
@@ -371,37 +370,37 @@ __attribute__((always_inline)) INLINE static void gpu_pack_part_force(
   for (ptrdiff_t i = 0; i < count; i++) {
     ptrdiff_t pi = i + first;
 
-    ps[i].x_h.w = part_get_h_global(pi);
+    gpu_send_f_set_h(ps, i, part_get_h_global(pi));
 
     const float* v = part_get_const_v_global(pi);
-    ps[i].vx_m.x = v[0];
-    ps[i].vx_m.y = v[1];
-    ps[i].vx_m.z = v[2];
-    ps[i].vx_m.w = part_get_mass_global(pi);
+    gpu_send_f_set_vx(ps, i, v[0]);
+    gpu_send_f_set_vy(ps, i, v[1]);
+    gpu_send_f_set_vz(ps, i, v[2]);
+    gpu_send_f_set_m(ps, i, part_get_mass_global(pi));
 
 #if defined(SPHENIX_PACK_GRADIENT_PARTICLE) || \
     defined(SPHENIX_PACK_GRADIENT_TYPE_PARTICLE) || \
     defined(SPHENIX_PACK_SHARED_TYPE_PARTICLE) || \
     defined(SPHENIX_PACK_SHARED_PARTICLE)
-    ps[i].u_rho_c_avisc.x = part_get_u_global(pi);
-    ps[i].u_rho_c_avisc.y = part_get_rho_global(pi);
-    ps[i].u_rho_c_avisc.z = part_get_soundspeed_global(pi);
-    ps[i].u_rho_c_avisc.w = part_get_alpha_av_global(pi);
+    gpu_send_f_set_u(ps, i, part_get_u_global(pi));
+    gpu_send_f_set_rho(ps, i, part_get_rho_global(pi));
+    gpu_send_f_set_c(ps, i, part_get_soundspeed_global(pi));
+    gpu_send_f_set_alpha_visc(ps, i, part_get_alpha_av_global(pi));
 
-    ps[i].f_p_balsara_adiff.x = part_get_f_gradh_global(pi);
-    ps[i].f_p_balsara_adiff.y = part_get_pressure_global(pi);
-    ps[i].f_p_balsara_adiff.z = part_get_balsara_global(pi);
-    ps[i].f_p_balsara_adiff.w = part_get_alpha_diff_global(pi);
+    gpu_send_f_set_f_gradh(ps, i, part_get_f_gradh_global(pi));
+    gpu_send_f_set_pressure(ps, i, part_get_pressure_global(pi));
+    gpu_send_f_set_balsara(ps, i, part_get_balsara_global(pi));
+    gpu_send_f_set_alpha_diff(ps, i, part_get_alpha_diff_global(pi));
 #else
-    ps[i].u_rho_f_p.x = part_get_u_global(pi);
-    ps[i].u_rho_f_p.y = part_get_rho_global(pi);
-    ps[i].u_rho_f_p.z = part_get_f_gradh_global(pi);
-    ps[i].u_rho_f_p.w = part_get_pressure_global(pi);
+    gpu_send_f_set_u(ps, i, part_get_u_global(pi));
+    gpu_send_f_set_rho(ps, i, part_get_rho_global(pi));
+    gpu_send_f_set_f_gradh(ps, i, part_get_f_gradh_global(pi));
+    gpu_send_f_set_pressure(ps, i, part_get_pressure_global(pi));
 
-    ps[i].bals_c_avisc_adiff.x = part_get_balsara_global(pi);
-    ps[i].bals_c_avisc_adiff.y = part_get_soundspeed_global(pi);
-    ps[i].bals_c_avisc_adiff.z = part_get_alpha_av_global(pi);
-    ps[i].bals_c_avisc_adiff.w = part_get_alpha_diff_global(pi);
+    gpu_send_f_set_balsara(ps, i, part_get_balsara_global(pi));
+    gpu_send_f_set_c(ps, i, part_get_soundspeed_global(pi));
+    gpu_send_f_set_alpha_visc(ps, i, part_get_alpha_av_global(pi));
+    gpu_send_f_set_alpha_diff(ps, i, part_get_alpha_diff_global(pi));
 #endif
   }
 
@@ -411,10 +410,10 @@ __attribute__((always_inline)) INLINE static void gpu_pack_part_force(
   for (ptrdiff_t i = 0; i < count; i++) {
     ptrdiff_t pi = i + first;
 
-    ps[i].timebin_minngbtimebin_pjs_pje.x = (int)part_get_time_bin_global(pi);
+    gpu_send_f_set_time_bin(ps, i, (int)part_get_time_bin_global(pi));
     int mintbin = (int)part_get_timestep_limiter_min_ngb_time_bin_global(pi);
-    ps[i].timebin_minngbtimebin_pjs_pje.y = mintbin;
-    ps[i].timebin_minngbtimebin_pjs_pje.z = cjstart;
-    ps[i].timebin_minngbtimebin_pjs_pje.w = cjend;
+    gpu_send_f_set_min_ngb_time_bin(ps, i, mintbin);
+    gpu_send_f_set_pjs(ps, i, cjstart);
+    gpu_send_f_set_pje(ps, i, cjend);
   }
 }
