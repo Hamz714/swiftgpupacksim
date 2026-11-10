@@ -56,6 +56,7 @@ AM_SOURCES += io.c
 
 # Include files for distribution, not installation.
 nobase_noinst_HEADERS = swift_placeholders/cuda/gpu_part_structs.h
+nobase_noinst_HEADERS += swift_placeholders/cuda/gpu_part_buffer_access.h
 nobase_noinst_HEADERS += swift_placeholders/minmax.h
 nobase_noinst_HEADERS += swift_placeholders/barrier.h
 nobase_noinst_HEADERS += swift_placeholders/atomic.h

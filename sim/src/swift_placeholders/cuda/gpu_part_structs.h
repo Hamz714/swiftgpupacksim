@@ -186,6 +186,16 @@ struct gpu_part_recv_f {
 /*! Size in bytes of a single element of any SoA buffer array */
 #define GPU_BUFFER_SOA_ELEMENT_SIZE 4
 
+/*! Field array number f of a SoA buffer starts f * GPU_BUFFER_SOA_STAGGER
+ * bytes after the (page aligned) start of its allocation. Without this, all
+ * arrays of a buffer have the same address modulo the page size, map to the
+ * same L1 cache sets and evict each other when packed in the same loop (seen
+ * as a ~8x slower force pack with 20 arrays on an AMD EPYC 7542). Set to 0
+ * (e.g. CFLAGS=-DGPU_BUFFER_SOA_STAGGER=0) to reproduce that behaviour. */
+#ifndef GPU_BUFFER_SOA_STAGGER
+#define GPU_BUFFER_SOA_STAGGER 64
+#endif
+
 /*! SoA container for particle data required for density calcs */
 struct gpu_part_send_d_soa {
   float* restrict x;

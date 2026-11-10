@@ -59,17 +59,21 @@ static void gpu_soa_buffer_alloc(void* soa_struct, const size_t n_fields,
                                  const size_t n_elements) {
 
   void** fields = gpu_soa_buffer_fields(soa_struct);
-  const size_t bytes = n_elements * GPU_BUFFER_SOA_ELEMENT_SIZE;
 
   for (size_t f = 0; f < n_fields; f++) {
+    /* Stagger the start of each array, see GPU_BUFFER_SOA_STAGGER */
+    const size_t offset = f * GPU_BUFFER_SOA_STAGGER;
+    const size_t bytes = n_elements * GPU_BUFFER_SOA_ELEMENT_SIZE + offset;
+    void* base = NULL;
 #if defined(NO_CUDA_MALLOCHOST)
-    if (swift_memalign("gpu_soa_buffer", &fields[f], SWIFT_PART_ALIGNMENT,
-                       bytes) != 0)
+    if (swift_memalign("gpu_soa_buffer", &base, SWIFT_PART_ALIGNMENT, bytes) !=
+        0)
       error("Error while allocating memory for SoA GPU buffer");
 #else
-    cudaError_t cu_error = cudaMallocHost(&fields[f], bytes);
+    cudaError_t cu_error = cudaMallocHost(&base, bytes);
     swift_assert(cu_error == cudaSuccess);
 #endif
+    fields[f] = (char*)base + offset;
   }
 }
 
@@ -81,10 +85,11 @@ static void gpu_soa_buffer_free(void* soa_struct, const size_t n_fields) {
   void** fields = gpu_soa_buffer_fields(soa_struct);
 
   for (size_t f = 0; f < n_fields; f++) {
+    void* base = (char*)fields[f] - f * GPU_BUFFER_SOA_STAGGER;
 #if defined(NO_CUDA_MALLOCHOST)
-    free(fields[f]);
+    free(base);
 #else
-    cudaError_t cu_error = cudaFreeHost(fields[f]);
+    cudaError_t cu_error = cudaFreeHost(base);
     swift_assert(cu_error == cudaSuccess);
 #endif
     fields[f] = NULL;
