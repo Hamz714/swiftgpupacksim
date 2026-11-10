@@ -35,8 +35,12 @@ CUDA=/cosma/local/Nvidia-hpc-sdk/2024_245/Linux_x86_64/24.5/cuda
 DIRS="EAGLE25_64threads Gresho256_64threads"
 
 source "${MODULES_SCRIPT:-/cosma/apps/do015/dc-ibra4/swift_modules.sh}"
-module load likwid/5.5.1
 module list
+# None of the likwid modules can be loaded together with intel_comp/2025.2.1.
+# likwid-pin is only used for thread pinning and does not need to match the
+# compiler, so call it by its full path.
+LIKWID_PIN="${LIKWID_PIN:-/cosma/local/likwid/gnu_14.1.0/5.5.1/bin/likwid-pin}"
+[[ -x "$LIKWID_PIN" ]] || { echo "likwid-pin not found: $LIKWID_PIN"; exit 1; }
 
 echo "host: $(hostname), job: ${SLURM_JOB_ID:-none}, buffer: $BUFFER"
 echo "repo: $REPO @ $(git -C "$REPO" rev-parse --short HEAD) ($(git -C "$REPO" rev-parse --abbrev-ref HEAD))"
@@ -89,7 +93,7 @@ for loop in "none" "by-struct" "by-element" "by-type" "by-struct-and-type"; do
 
       ex="$BINDIR"/swiftgpupack_"$NODE"_"$layout"_"$part_access"_"$loop"_"$BUFFER"
       echo "running $ex on $dir"
-      likwid-pin --quiet -c N:0-"$((NTHREADS - 1))" \
+      "$LIKWID_PIN" --quiet -c N:0-"$((NTHREADS - 1))" \
         "$ex" -s 5 --noflush "$REPO/data/$NODE/$dir"
       mv results_"$layout".csv "$outfile"
       echo "written $outfile"
