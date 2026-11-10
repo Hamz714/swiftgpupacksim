@@ -215,7 +215,6 @@ void gpu_data_buffers_reset(struct gpu_offload_data* buf) {
    * mode. */
 
   const struct gpu_global_pack_params pars = buf->md.params;
-  const struct gpu_pack_metadata md = buf->md;
 
 #if defined(GPU_BUFFER_SOA)
   gpu_soa_buffer_zero(&buf->parts_send_d, buf->n_send_fields,
@@ -223,6 +222,7 @@ void gpu_data_buffers_reset(struct gpu_offload_data* buf) {
   gpu_soa_buffer_zero(&buf->parts_recv_d, buf->n_recv_fields,
                       pars.part_buffer_size);
 #else
+  const struct gpu_pack_metadata md = buf->md;
   memset(buf->parts_send_d, 0, pars.part_buffer_size * md.send_struct_size);
   memset(buf->parts_recv_d, 0, pars.part_buffer_size * md.recv_struct_size);
 #endif
