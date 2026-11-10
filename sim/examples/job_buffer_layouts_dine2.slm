@@ -1,0 +1,101 @@
+#!/usr/bin/bash -l
+
+#SBATCH --job-name buf-dine2
+#SBATCH --time 36:00:00
+#SBATCH --partition dine2
+#SBATCH --account do015
+#SBATCH --exclusive
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=64
+#SBATCH --output buf-dine2_%x_%j.out
+
+# GPU transfer buffer layout comparison on dine2 (global-var particle access).
+#
+# Builds the executables on the compute node (-march=native) with
+# ../make_buffer_layout_variants.sh, then replays the 5-step logs for every
+# particle layout and loop split. One job per buffer layout; submit from the
+# directory where results should go:
+#
+#   sbatch --export=ALL,BUFFER=aos,REPO=/path/to/swiftgpupacksim job_buffer_layouts_dine2.slm
+#   sbatch --export=ALL,BUFFER=soa,REPO=/path/to/swiftgpupacksim job_buffer_layouts_dine2.slm
+#
+# Results: <submit dir>/dine2_5steps_buffer-<BUFFER>/<dir>_global-var_<split>_noflush/results_<layout>.csv
+# Existing results are not recomputed, so a resubmitted job continues where the
+# previous one stopped.
+
+set -e
+
+: "${BUFFER:?set BUFFER=aos or BUFFER=soa}"
+: "${REPO:?set REPO to the swiftgpupacksim repository root}"
+
+NODE=dine2
+RUNDIR="${SLURM_SUBMIT_DIR:-$PWD}"
+CUDA=/cosma/local/Nvidia-hpc-sdk/2024_245/Linux_x86_64/24.5/cuda
+DIRS="EAGLE25_64threads Gresho256_64threads"
+
+source "${MODULES_SCRIPT:-/cosma/apps/do015/dc-ibra4/swift_modules.sh}"
+module load likwid/5.5.1
+module list
+
+echo "host: $(hostname), job: ${SLURM_JOB_ID:-none}, buffer: $BUFFER"
+echo "repo: $REPO @ $(git -C "$REPO" rev-parse --short HEAD) ($(git -C "$REPO" rev-parse --abbrev-ref HEAD))"
+lscpu | grep "Model name"
+
+# ---------------------------------------------------------------------------
+# Build. Use a private copy of sim/ per node+buffer, so that concurrent jobs
+# don't share an in-tree build.
+# ---------------------------------------------------------------------------
+BUILDDIR="$RUNDIR/build_${NODE}_${BUFFER}"
+BINDIR="$RUNDIR/bin_${NODE}"
+mkdir -p "$BUILDDIR" "$BINDIR"
+rsync -a --exclude '/swiftgpupack' --exclude '/swiftgpupack_*' \
+  --exclude '/buffer_check' "$REPO/sim/" "$BUILDDIR/sim/"
+"$BUILDDIR/sim/make_buffer_layout_variants.sh" "$NODE" "$BINDIR" \
+  --buffers "$BUFFER" --cuda "$CUDA" -j 32 > "$BUILDDIR/build.log" 2>&1 ||
+  { tail -50 "$BUILDDIR/build.log"; exit 1; }
+echo "build done"
+
+# ---------------------------------------------------------------------------
+# Runs
+# ---------------------------------------------------------------------------
+export OMP_PROC_BIND=true
+
+RESDIR="$RUNDIR/${NODE}_5steps_buffer-${BUFFER}"
+WORKDIR="$RUNDIR/work_${NODE}_${BUFFER}"
+mkdir -p "$RESDIR" "$WORKDIR"
+cd "$WORKDIR"
+rm -f results_*.csv
+
+part_access="global-var"
+
+for loop in "none" "by-struct" "by-element" "by-type" "by-struct-and-type"; do
+  for dir in $DIRS; do
+
+    outdir="$RESDIR"/"$dir"_"$part_access"_"$loop"_noflush
+    mkdir -p "$outdir"
+
+    NTHREADS=32
+    if [[ "$dir" == *"_64thread"* ]]; then NTHREADS=64; fi
+    export OMP_NUM_THREADS=$NTHREADS
+
+    for layout in aos soa upstream pack-gradient pack-force pack-shared pack-force-type random-order pack-gradient-type pack-shared-type; do
+
+      outfile="$outdir"/results_"$layout".csv
+      if [[ -f "$outfile" ]]; then
+        echo "found $outfile, not rerunning"
+        continue
+      fi
+
+      ex="$BINDIR"/swiftgpupack_"$NODE"_"$layout"_"$part_access"_"$loop"_"$BUFFER"
+      echo "running $ex on $dir"
+      likwid-pin --quiet -c N:0-"$((NTHREADS - 1))" \
+        "$ex" -s 5 --noflush "$REPO/data/$NODE/$dir"
+      mv results_"$layout".csv "$outfile"
+      echo "written $outfile"
+
+    done
+  done
+done
+
+echo "all done"
