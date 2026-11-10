@@ -288,38 +288,29 @@ void run_simulation(struct parameters* params) {
     struct gpu_offload_data gpu_buf_forc;
 
     gpu_data_buffers_init(&gpu_buf_dens, &gpu_pack_params,
-                          sizeof(struct gpu_part_send_d),
-                          sizeof(struct gpu_part_recv_d));
+                          GPU_PART_SEND_D_BYTES, GPU_PART_RECV_D_BYTES);
     gpu_data_buffers_init(&gpu_buf_grad, &gpu_pack_params,
-                          sizeof(struct gpu_part_send_g),
-                          sizeof(struct gpu_part_recv_g));
+                          GPU_PART_SEND_G_BYTES, GPU_PART_RECV_G_BYTES);
     gpu_data_buffers_init(&gpu_buf_forc, &gpu_pack_params,
-                          sizeof(struct gpu_part_send_f),
-                          sizeof(struct gpu_part_recv_f));
+                          GPU_PART_SEND_F_BYTES, GPU_PART_RECV_F_BYTES);
+
+    /* Bytes per particle summed over all six host-side buffers */
+    const size_t gpu_buf_bytes_per_part =
+        GPU_PART_SEND_D_BYTES + GPU_PART_RECV_D_BYTES + GPU_PART_SEND_G_BYTES +
+        GPU_PART_RECV_G_BYTES + GPU_PART_SEND_F_BYTES + GPU_PART_RECV_F_BYTES;
 
     if (params->verbose) {
       if (my_thread_id == 0) {
         message("Allocating host-side GPU part buffers: estimated %g MB total",
                 (unsigned long)params->nr_threads *
-                    gpu_pack_params.part_buffer_size *
-                    (sizeof(struct gpu_part_send_d) +
-                     sizeof(struct gpu_part_recv_d) +
-                     sizeof(struct gpu_part_send_g) +
-                     sizeof(struct gpu_part_recv_g) +
-                     sizeof(struct gpu_part_send_f) +
-                     sizeof(struct gpu_part_recv_f)) *
+                    gpu_pack_params.part_buffer_size * gpu_buf_bytes_per_part *
                     1e-6);
       }
 #ifdef SWIFT_DEBUG_CHECKS
       message(
           "Thread %d: Allocating host-side GPU part buffers: %g MB",
           my_thread_id,
-          gpu_pack_params.part_buffer_size *
-              (sizeof(struct gpu_part_send_d) + sizeof(struct gpu_part_recv_d) +
-               sizeof(struct gpu_part_send_g) + sizeof(struct gpu_part_recv_g) +
-               sizeof(struct gpu_part_send_f) +
-               sizeof(struct gpu_part_recv_f)) *
-              1e-6);
+          gpu_pack_params.part_buffer_size * gpu_buf_bytes_per_part * 1e-6);
 #endif
     }
 

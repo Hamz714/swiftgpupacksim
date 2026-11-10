@@ -36,15 +36,87 @@ extern "C" {
 #include <cuda.h>
 #include <cuda_runtime.h>
 
+#if defined(GPU_BUFFER_SOA)
+
+/**
+ * @brief View a SoA buffer struct as an array of its field pointers.
+ *
+ * All SoA buffer structs (see gpu_part_structs.h) consist only of pointers to
+ * 4-byte scalars, so their members can be handled generically.
+ */
+static void** gpu_soa_buffer_fields(void* soa_struct) {
+  return (void**)soa_struct;
+}
+
+/**
+ * @brief Allocate every field array of a SoA buffer struct.
+ *
+ * @param soa_struct: pointer to the SoA struct whose pointers are set
+ * @param n_fields: number of field arrays in the struct
+ * @param n_elements: number of particles each array holds
+ */
+static void gpu_soa_buffer_alloc(void* soa_struct, const size_t n_fields,
+                                 const size_t n_elements) {
+
+  void** fields = gpu_soa_buffer_fields(soa_struct);
+  const size_t bytes = n_elements * GPU_BUFFER_SOA_ELEMENT_SIZE;
+
+  for (size_t f = 0; f < n_fields; f++) {
+#if defined(NO_CUDA_MALLOCHOST)
+    if (swift_memalign("gpu_soa_buffer", &fields[f], SWIFT_PART_ALIGNMENT,
+                       bytes) != 0)
+      error("Error while allocating memory for SoA GPU buffer");
+#else
+    cudaError_t cu_error = cudaMallocHost(&fields[f], bytes);
+    swift_assert(cu_error == cudaSuccess);
+#endif
+  }
+}
+
+/**
+ * @brief Free every field array of a SoA buffer struct.
+ */
+static void gpu_soa_buffer_free(void* soa_struct, const size_t n_fields) {
+
+  void** fields = gpu_soa_buffer_fields(soa_struct);
+
+  for (size_t f = 0; f < n_fields; f++) {
+#if defined(NO_CUDA_MALLOCHOST)
+    free(fields[f]);
+#else
+    cudaError_t cu_error = cudaFreeHost(fields[f]);
+    swift_assert(cu_error == cudaSuccess);
+#endif
+    fields[f] = NULL;
+  }
+}
+
+#ifdef SWIFT_DEBUG_CHECKS
+/**
+ * @brief Zero out every field array of a SoA buffer struct.
+ */
+static void gpu_soa_buffer_zero(void* soa_struct, const size_t n_fields,
+                                const size_t n_elements) {
+
+  void** fields = gpu_soa_buffer_fields(soa_struct);
+  for (size_t f = 0; f < n_fields; f++)
+    memset(fields[f], 0, n_elements * GPU_BUFFER_SOA_ELEMENT_SIZE);
+}
+#endif
+
+#endif /* GPU_BUFFER_SOA */
+
 /**
  * @brief initialise GPU data buffers (including their associated metadata)
  *
  * @param buf: the buffers to be initialised
  * @param params: global gpu packing parameters
- * @param send_struct_size: size of struct used for send arrays (both host and
- * device)
- * @param recv_struct_size: size of struct used for recv arrays (both host and
- * device)
+ * @param send_struct_size: bytes per particle of the send buffer (both host
+ * and device). For AoS buffers, this is the size of the send struct; for SoA
+ * buffers, it is the sum over all field arrays, i.e. n_fields *
+ * GPU_BUFFER_SOA_ELEMENT_SIZE (see GPU_PART_SEND_*_BYTES).
+ * @param recv_struct_size: bytes per particle of the recv buffer, same
+ * convention as send_struct_size.
  */
 void gpu_data_buffers_init(struct gpu_offload_data* buf,
                            const struct gpu_global_pack_params* params,
@@ -59,7 +131,17 @@ void gpu_data_buffers_init(struct gpu_offload_data* buf,
   struct gpu_pack_metadata* md = &(buf->md);
   gpu_pack_metadata_init(md, params);
 
-#if defined(NO_CUDA_MALLOCHOST)
+#if defined(GPU_BUFFER_SOA)
+  /* One array per scalar field. The send/recv unions alias the density,
+   * gradient and force SoA structs, so allocate through the density members
+   * with the number of fields of whichever buffer this is. */
+  buf->n_send_fields = send_struct_size / GPU_BUFFER_SOA_ELEMENT_SIZE;
+  buf->n_recv_fields = recv_struct_size / GPU_BUFFER_SOA_ELEMENT_SIZE;
+  gpu_soa_buffer_alloc(&buf->parts_send_d, buf->n_send_fields,
+                       part_buffer_size);
+  gpu_soa_buffer_alloc(&buf->parts_recv_d, buf->n_recv_fields,
+                       part_buffer_size);
+#elif defined(NO_CUDA_MALLOCHOST)
   /* Hack to get a working test version on my own machine. */
   /* buf->parts_send_d = malloc(part_buffer_size * send_struct_size); */
   /* swift_assert(buf->parts_send_d != NULL); */
@@ -130,8 +212,15 @@ void gpu_data_buffers_reset(struct gpu_offload_data* buf) {
   const struct gpu_global_pack_params pars = buf->md.params;
   const struct gpu_pack_metadata md = buf->md;
 
+#if defined(GPU_BUFFER_SOA)
+  gpu_soa_buffer_zero(&buf->parts_send_d, buf->n_send_fields,
+                      pars.part_buffer_size);
+  gpu_soa_buffer_zero(&buf->parts_recv_d, buf->n_recv_fields,
+                      pars.part_buffer_size);
+#else
   memset(buf->parts_send_d, 0, pars.part_buffer_size * md.send_struct_size);
   memset(buf->parts_recv_d, 0, pars.part_buffer_size * md.recv_struct_size);
+#endif
 
   /* Can't do this from the host side, would need to launch cuda kernel */
   /* bzero(buf->d_parts_recv_d, pars.part_buffer_size *
@@ -150,7 +239,11 @@ void gpu_data_buffers_free(struct gpu_offload_data* buf) {
   struct gpu_pack_metadata* md = &(buf->md);
   gpu_pack_metadata_free(md);
 
-#if defined(NO_CUDA_MALLOCHOST)
+#if defined(GPU_BUFFER_SOA)
+  /* Same aliasing via the density members as in gpu_data_buffers_init */
+  gpu_soa_buffer_free(&buf->parts_send_d, buf->n_send_fields);
+  gpu_soa_buffer_free(&buf->parts_recv_d, buf->n_recv_fields);
+#elif defined(NO_CUDA_MALLOCHOST)
   free(buf->parts_send_d);
   free(buf->parts_recv_d);
 #else

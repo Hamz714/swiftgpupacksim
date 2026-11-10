@@ -47,6 +47,9 @@ struct parameters {
   /*! Currently used loop splitting variant */
   char loop_split[20];
 
+  /*! Currently used GPU transfer buffer layout */
+  char buffer_layout[8];
+
   /*! Root dir of measurement data */
   char data_root_dir[200];
 };

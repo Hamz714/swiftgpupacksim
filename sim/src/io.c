@@ -264,6 +264,7 @@ void io_write_result(const ticks timers_arr[timer_count],
   fprintf(out_fp, "# memory layout: %s\n", params->memory_layout);
   fprintf(out_fp, "# access variant: %s\n", params->access_variant);
   fprintf(out_fp, "# loop splitting variant: %s\n", params->loop_split);
+  fprintf(out_fp, "# buffer layout: %s\n", params->buffer_layout);
   fprintf(out_fp, "# vectorization: %d\n", vec);
   fprintf(out_fp, "# packed structs: %d\n", packed);
   fprintf(out_fp, "# reproduced measurements: %s\n", params->data_root_dir);

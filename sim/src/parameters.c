@@ -88,6 +88,15 @@ void init_params(struct parameters* params) {
 #endif
   strcpy(params->loop_split, loop_split);
 
+#if defined(GPU_BUFFER_AOS)
+  char buffer_layout[8] = "aos";
+#elif defined(GPU_BUFFER_SOA)
+  char buffer_layout[8] = "soa";
+#else
+#error "Unknown GPU buffer layout"
+#endif
+  strcpy(params->buffer_layout, buffer_layout);
+
   /* Empty string for intial value of data root dir */
   strcpy(params->data_root_dir, "\0");
 }
@@ -148,6 +157,7 @@ void print_params(struct parameters* params) {
   printf("\t memory layout:          %s\n", params->memory_layout);
   printf("\t access variant:         %s\n", params->access_variant);
   printf("\t loop splitting variant: %s\n", params->loop_split);
+  printf("\t buffer layout:          %s\n", params->buffer_layout);
   printf("\t vectorization:          %12d\n", vec);
   printf("\t packed structs:         %12d\n", packed);
   printf("\t measurement data:       %s\n", params->data_root_dir);

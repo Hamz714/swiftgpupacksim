@@ -63,6 +63,30 @@ struct gpu_offload_data {
     struct gpu_part_recv_f* d_parts_recv_f;
   };
 
+#if defined(GPU_BUFFER_SOA)
+
+  /*! Arrays used to send particle data from host to device (one array per
+   * scalar quantity) */
+  union {
+    struct gpu_part_send_d_soa parts_send_d;
+    struct gpu_part_send_g_soa parts_send_g;
+    struct gpu_part_send_f_soa parts_send_f;
+  };
+
+  /*! Arrays used to receive particle data from device on host (one array
+   * per scalar quantity) */
+  union {
+    struct gpu_part_recv_d_soa parts_recv_d;
+    struct gpu_part_recv_g_soa parts_recv_g;
+    struct gpu_part_recv_f_soa parts_recv_f;
+  };
+
+  /*! Number of field arrays allocated in parts_send_* and parts_recv_* */
+  size_t n_send_fields;
+  size_t n_recv_fields;
+
+#else
+
   /*! Array used to send particle data from host to device */
   union {
     struct gpu_part_send_d* parts_send_d;
@@ -76,6 +100,8 @@ struct gpu_offload_data {
     struct gpu_part_recv_g* parts_recv_g;
     struct gpu_part_recv_f* parts_recv_f;
   };
+
+#endif /* GPU_BUFFER_SOA */
 
   /*! Handle on events per cuda stream to register completion of async ops */
   cudaEvent_t* event_end;

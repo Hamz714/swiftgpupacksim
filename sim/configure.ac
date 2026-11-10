@@ -966,6 +966,30 @@ case "$with_loop_split" in
 esac
 
 
+AC_ARG_WITH([buffer-layout],
+   [AS_HELP_STRING([--with-buffer-layout=<value>],
+      [Memory layout of the host-side GPU transfer (send/recv) buffers @<:@aos, soa. Default: aos@:>@. soa requires --with-particle-access=global-var]
+   )],
+   [with_buffer_layout="$withval"],
+   [with_buffer_layout="aos"]
+)
+
+case "$with_buffer_layout" in
+   "aos")
+      AC_DEFINE([GPU_BUFFER_AOS], [1], [GPU transfer buffers are arrays of structs])
+   ;;
+   "soa")
+      if test "$with_part_access" != "global-var"; then
+         AC_MSG_ERROR([--with-buffer-layout=soa is only implemented for --with-particle-access=global-var (got $with_part_access)])
+      fi
+      AC_DEFINE([GPU_BUFFER_SOA], [1], [GPU transfer buffers are structs of (scalar) arrays])
+   ;;
+   *)
+      AC_MSG_ERROR([Unknown buffer layout: $with_buffer_layout])
+   ;;
+esac
+
+
 AC_ARG_WITH([cache-flush],
    [AS_HELP_STRING([--with-cache-flush=<value>],
       [Cache flushing method between each pack/unpack operation. @<:@array, bigarray, x86. Default: array@:>@]
@@ -1060,6 +1084,7 @@ AC_MSG_RESULT([
    Part memalign         : $with_part_align
    Particle access       : $with_part_access
    Loop split            : $with_loop_split
+   Buffer layout         : $with_buffer_layout
 
  ------------------------]
 )
