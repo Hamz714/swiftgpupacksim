@@ -1,6 +1,7 @@
 #include "run_simulation.h"
 
 #include "flush_caches.h"
+#include "gpu_buffer_dump.h"
 #include "gpu_part_pack_functions.h"
 #include "hydro_part_init.h"
 #include "io.h"
@@ -82,6 +83,11 @@ __attribute__((always_inline)) INLINE static double replay_event(
                             shift, 0, 0);
       const ticks toc = getticks();
 
+#ifdef GPU_BUFFER_DUMP
+      gpu_buffer_dump_send_d(buf_dens->parts_send_d, event->pack_index,
+                             event->count);
+#endif
+
       atomic_add(&timers_step[timer_density_pack], toc - tic);
       atomic_add_d(&timings_log_step[timer_density_pack], event->timing);
 
@@ -96,6 +102,11 @@ __attribute__((always_inline)) INLINE static double replay_event(
                              shift, 0, 0);
       const ticks toc = getticks();
 
+#ifdef GPU_BUFFER_DUMP
+      gpu_buffer_dump_send_g(buf_grad->parts_send_g, event->pack_index,
+                             event->count);
+#endif
+
       atomic_add(&timers_step[timer_gradient_pack], toc - tic);
       atomic_add_d(&timings_log_step[timer_gradient_pack], event->timing);
 
@@ -109,6 +120,11 @@ __attribute__((always_inline)) INLINE static double replay_event(
       gpu_pack_part_force(&ci, buf_forc->parts_send_f, event->pack_index, shift,
                           0, 0);
       const ticks toc = getticks();
+
+#ifdef GPU_BUFFER_DUMP
+      gpu_buffer_dump_send_f(buf_forc->parts_send_f, event->pack_index,
+                             event->count);
+#endif
 
       atomic_add(&timers_step[timer_force_pack], toc - tic);
       atomic_add_d(&timings_log_step[timer_force_pack], event->timing);
@@ -128,10 +144,20 @@ __attribute__((always_inline)) INLINE static double replay_event(
 
     if (subtype == task_subtype_density) {
 
+#ifdef GPU_BUFFER_DUMP
+      gpu_buffer_fill_recv_d(buf_dens->parts_recv_d, event->pack_index,
+                             event->count);
+#endif
+
       const ticks tic = getticks();
       gpu_unpack_part_density(&ci, buf_dens->parts_recv_d, event->pack_index,
                               event->count, e);
       const ticks toc = getticks();
+
+#ifdef GPU_BUFFER_DUMP
+      gpu_buffer_dump_recv_d(buf_dens->parts_recv_d, event->pack_index,
+                             event->count);
+#endif
 
       atomic_add(&timers_step[timer_density_unpack], toc - tic);
       atomic_add_d(&timings_log_step[timer_density_unpack], event->timing);
@@ -142,10 +168,20 @@ __attribute__((always_inline)) INLINE static double replay_event(
 
     } else if (subtype == task_subtype_gradient) {
 
+#ifdef GPU_BUFFER_DUMP
+      gpu_buffer_fill_recv_g(buf_grad->parts_recv_g, event->pack_index,
+                             event->count);
+#endif
+
       const ticks tic = getticks();
       gpu_unpack_part_gradient(&ci, buf_grad->parts_recv_g, event->pack_index,
                                event->count, e);
       const ticks toc = getticks();
+
+#ifdef GPU_BUFFER_DUMP
+      gpu_buffer_dump_recv_g(buf_grad->parts_recv_g, event->pack_index,
+                             event->count);
+#endif
 
       atomic_add(&timers_step[timer_gradient_unpack], toc - tic);
       atomic_add_d(&timings_log_step[timer_gradient_unpack], event->timing);
@@ -156,10 +192,20 @@ __attribute__((always_inline)) INLINE static double replay_event(
 
     } else if (subtype == task_subtype_force) {
 
+#ifdef GPU_BUFFER_DUMP
+      gpu_buffer_fill_recv_f(buf_forc->parts_recv_f, event->pack_index,
+                             event->count);
+#endif
+
       const ticks tic = getticks();
       gpu_unpack_part_force(&ci, buf_forc->parts_recv_f, event->pack_index,
                             event->count, e);
       const ticks toc = getticks();
+
+#ifdef GPU_BUFFER_DUMP
+      gpu_buffer_dump_recv_f(buf_forc->parts_recv_f, event->pack_index,
+                             event->count);
+#endif
 
       atomic_add(&timers_step[timer_force_unpack], toc - tic);
       atomic_add_d(&timings_log_step[timer_force_unpack], event->timing);
@@ -209,6 +255,16 @@ void run_simulation(struct parameters* params) {
 
   /* Copy pointers over to the global data */
   global_hydro_part_arrays = part_data;
+
+#ifdef GPU_BUFFER_DUMP
+  /* Deterministic particle data and serial replay for the buffer dumps */
+  message("Buffer dump mode: replaying events serially with one thread.");
+  gpu_buffer_dump_init_particles(&part_data, params->nr_parts);
+  gpu_buffer_dump_open();
+  const int nr_omp_threads = 1;
+#else
+  const int nr_omp_threads = params->nr_threads;
+#endif
 
   /* Initialise particle locks */
   if (params->verbose)
@@ -261,7 +317,7 @@ void run_simulation(struct parameters* params) {
                       /*nthreads=*/1);
 
 
-#pragma omp parallel num_threads(params->nr_threads)
+#pragma omp parallel num_threads(nr_omp_threads)
   {
 
     int my_thread_id = omp_get_thread_num();
@@ -269,9 +325,9 @@ void run_simulation(struct parameters* params) {
 #ifdef SWIFT_DEBUG_CHECKS
     /* Double-check nothing's overwriting what we want to do. */
     int n_threads = omp_get_num_threads();
-    if (n_threads != params->nr_threads) {
+    if (n_threads != nr_omp_threads) {
       error("Started a parallel region with %d threads instead of %d",
-            n_threads, params->nr_threads);
+            n_threads, nr_omp_threads);
     }
 #endif
 
@@ -417,6 +473,11 @@ void run_simulation(struct parameters* params) {
     gpu_data_buffers_free(&gpu_buf_forc);
 
   } /* omp parallel */
+
+#ifdef GPU_BUFFER_DUMP
+  gpu_buffer_dump_particles(params->nr_parts);
+  gpu_buffer_dump_close();
+#endif
 
   /* Clean up after yourself */
   clear_parts(&part_data);

@@ -1042,6 +1042,21 @@ fi
 
 
 
+AC_ARG_ENABLE([buffer-dump],
+   [AS_HELP_STRING([--enable-buffer-dump],
+     [Correctness check: replay serially with deterministic data and dump GPU buffer contents after each pack/unpack, plus the final particle state, to gpu_buffer_dump.bin. Requires --with-particle-access=global-var. Timings are meaningless. @<:@no/yes@:>@]
+   )],
+   [enable_buffer_dump="$enableval"],
+   [enable_buffer_dump="no"]
+)
+if test "$enable_buffer_dump" = "yes"; then
+  if test "$with_part_access" != "global-var"; then
+    AC_MSG_ERROR([--enable-buffer-dump requires --with-particle-access=global-var (got $with_part_access)])
+  fi
+  AC_DEFINE([GPU_BUFFER_DUMP], [1], [Dump GPU buffer contents for correctness checks])
+fi
+
+
 # Handle .in files.
 AC_CONFIG_FILES([Makefile src/Makefile tests/Makefile])
 
@@ -1085,6 +1100,7 @@ AC_MSG_RESULT([
    Particle access       : $with_part_access
    Loop split            : $with_loop_split
    Buffer layout         : $with_buffer_layout
+   Buffer dump           : $enable_buffer_dump
 
  ------------------------]
 )
