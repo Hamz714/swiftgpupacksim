@@ -59,6 +59,13 @@ parser.add_argument(
 )
 parser.add_argument("--png", action="store_true", help="write .png instead of .pdf")
 parser.add_argument(
+    "-s",
+    "--suffix",
+    default="",
+    help="read <node>_5steps_buffer-<aos|soa><SUFFIX> (e.g. _v2) and append "
+    "SUFFIX to the output file names",
+)
+parser.add_argument(
     "--no-tex", action="store_true", help="don't use LaTeX for text rendering"
 )
 
@@ -87,6 +94,9 @@ PART_ACCESS = "global-var"
 OTHER_VARIANT = "noflush"
 
 
+SUFFIX = ""
+
+
 def read_results(srcdir, node, experiment, nthreads):
     """
     Returns dict results[buffer][split][layout] = timings array (ms), in the
@@ -95,7 +105,7 @@ def read_results(srcdir, node, experiment, nthreads):
     results = {}
     for buffer in BUFFERS:
         results[buffer] = {}
-        bufdir = os.path.join(srcdir, f"{node}_5steps_buffer-{buffer}")
+        bufdir = os.path.join(srcdir, f"{node}_5steps_buffer-{buffer}{SUFFIX}")
         for split in LOOP_SPLITS:
             results[buffer][split] = {}
             for layout in LAYOUTS:
@@ -190,7 +200,7 @@ def plot_experiment(results, node, experiment, nthreads, outdir, png):
 
     ext = "png" if png else "pdf"
     fname = os.path.join(
-        outdir, f"buffer_layouts_{node}_{experiment}_{nthreads}threads.{ext}"
+        outdir, f"buffer_layouts_{node}_{experiment}_{nthreads}threads{SUFFIX}.{ext}"
     )
     fig.savefig(fname, dpi=mydpi, bbox_inches="tight")
     plt.close(fig)
@@ -247,7 +257,7 @@ def write_summary(results, node, experiment, nthreads, outdir):
         lines.append("")
 
     fname = os.path.join(
-        outdir, f"buffer_layouts_{node}_{experiment}_{nthreads}threads_summary.txt"
+        outdir, f"buffer_layouts_{node}_{experiment}_{nthreads}threads{SUFFIX}_summary.txt"
     )
     with open(fname, "w") as fp:
         fp.write("\n".join(lines) + "\n")
@@ -257,6 +267,7 @@ def write_summary(results, node, experiment, nthreads, outdir):
 if __name__ == "__main__":
 
     args = parser.parse_args()
+    SUFFIX = args.suffix
     if args.no_tex:
         matplotlib.rcParams["text.usetex"] = False
     os.makedirs(args.outdir, exist_ok=True)
