@@ -29,6 +29,12 @@
 # touching the build directory (fails if one is missing), e.g.
 #
 #   sbatch --export=ALL,BUFFER=soa,REPO=...,RESULT_SUFFIX=_rep2,SKIP_BUILD=1 job_buffer_layouts_dine2.slm
+#
+# Partial reruns (e.g. after a code fix): BUILD_SUFFIX (e.g. _v2) is appended
+# to the build and executable folders, so fresh executables are built next to
+# the old ones; SPLITS / LAYOUTS (passed on to make_buffer_layout_variants.sh)
+# restrict what is built. Copy the results that don't need rerunning into the
+# RESULT_SUFFIX folder first; existing results are skipped.
 
 set -e
 
@@ -41,6 +47,7 @@ CUDA=/cosma/local/Nvidia-hpc-sdk/2024_245/Linux_x86_64/24.5/cuda
 DIRS="EAGLE25_64threads Gresho256_64threads"
 RESULT_SUFFIX="${RESULT_SUFFIX:-}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
+BUILD_SUFFIX="${BUILD_SUFFIX:-}"
 
 source "${MODULES_SCRIPT:-/cosma/apps/do015/dc-ibra4/swift_modules.sh}"
 module list
@@ -50,7 +57,8 @@ module list
 LIKWID_PIN="${LIKWID_PIN:-/cosma/local/likwid/gnu_14.1.0/5.5.1/bin/likwid-pin}"
 [[ -x "$LIKWID_PIN" ]] || { echo "likwid-pin not found: $LIKWID_PIN"; exit 1; }
 
-echo "host: $(hostname), job: ${SLURM_JOB_ID:-none}, buffer: $BUFFER, suffix: '$RESULT_SUFFIX', skip build: $SKIP_BUILD"
+echo "host: $(hostname), job: ${SLURM_JOB_ID:-none}, buffer: $BUFFER, suffix: '$RESULT_SUFFIX', build suffix: '$BUILD_SUFFIX', skip build: $SKIP_BUILD"
+echo "build restricted to splits: '${SPLITS:-all}', layouts: '${LAYOUTS:-all}'"
 echo "repo: $REPO @ $(git -C "$REPO" rev-parse --short HEAD) ($(git -C "$REPO" rev-parse --abbrev-ref HEAD))"
 lscpu | grep "Model name"
 
@@ -58,8 +66,8 @@ lscpu | grep "Model name"
 # Build. Use a private copy of sim/ per node+buffer, so that concurrent jobs
 # don't share an in-tree build.
 # ---------------------------------------------------------------------------
-BUILDDIR="$RUNDIR/build_${NODE}_${BUFFER}"
-BINDIR="$RUNDIR/bin_${NODE}"
+BUILDDIR="$RUNDIR/build_${NODE}_${BUFFER}${BUILD_SUFFIX}"
+BINDIR="$RUNDIR/bin_${NODE}${BUILD_SUFFIX}"
 if [[ "$SKIP_BUILD" == "1" ]]; then
   n=$(ls "$BINDIR"/swiftgpupack_"$NODE"_*_global-var_*_"$BUFFER" 2> /dev/null | wc -l)
   [[ "$n" -eq 50 ]] || { echo "SKIP_BUILD=1 but found $n/50 executables in $BINDIR"; exit 1; }
