@@ -40,43 +40,139 @@ DATANODE=gn002
 RUNDIR="${SLURM_SUBMIT_DIR:-$PWD}"
 BINDIR="$RUNDIR/bin_${NODE}"
 
-# Modules / toolchain. No module collection for Grace Hopper is available to
-# us (the original job uses the supervisor's `module restore gpu_swift_gn002`),
-# and /cosma/local has no aarch64 CUDA. So:
-#   compiler: GH_MODULES (default: the clang module meant for Grace nodes)
-#   CUDA:     GH_CUDA if set, else nvcc on PATH, else /usr/local/cuda
-#             (+ /usr/local/cuda-*). The job fails if none is found, rather
-#             than silently building without cudaMallocHost.
-#   pinning:  likwid-pin (ARM build) by path, as in the dine2 job.
+# ---------------------------------------------------------------------------
+# Toolchain. No module collection for Grace Hopper is available to us and the
+# login node shows no aarch64 CUDA, so the build job finds it on the node:
+#   compiler: GH_MODULES (default: the clang module meant for Grace nodes,
+#             which only sets CC=clang; falls back to gcc if there is no clang).
+#             It must support OpenMP 5.1 `omp error` (clang >= 18, gcc >= 12),
+#             otherwise the job stops with exit code 2.
+#   CUDA, first match wins:
+#     1. GH_CUDA (CUDA root) if set
+#     2. nvcc on PATH after loading GH_MODULES
+#     3. cuda/* and nvhpc/* modules from `module avail` on the node, newest
+#        version first; the first one whose nvcc runs here is kept
+#     4. /usr/local/cuda, /usr/local/cuda-* (newest first)
+#   If nothing is found the job stops with exit code 2 (no fallback to
+#   building without cudaMallocHost, which would time a different code path).
+# The build job writes its choice to $BINDIR/toolchain_<BUFFER>.env; run jobs
+# load exactly that (libcudart is linked dynamically).
+#   pinning: likwid-pin (ARM build) by path, as in the dine2 job.
+# ---------------------------------------------------------------------------
+TOOLCHAIN_ENV="$BINDIR/toolchain_${BUFFER}.env"
+if [[ "$MODE" == "run" ]]; then
+  [[ -f "$TOOLCHAIN_ENV" ]] || { echo "missing $TOOLCHAIN_ENV (run the build job first)"; exit 2; }
+  echo "loading toolchain from $TOOLCHAIN_ENV"; cat "$TOOLCHAIN_ENV"
+  # shellcheck disable=SC1090
+  source "$TOOLCHAIN_ENV"
+fi
+
 GH_MODULES="${GH_MODULES:-clang/18.1.8arm}"
 module purge
 for m in $GH_MODULES; do module load "$m"; done
-module list 2>&1
-echo "CC=${CC:-unset} ($(command -v "${CC:-cc}"))"; "${CC:-cc}" --version | head -1
+# cuda/nvhpc modules set CC (and CXX, CPP, FC, ...) to their own compilers;
+# keep what GH_MODULES set up and restore it after loading CUDA.
+COMPILER_VARS="CC CXX CPP FC F90 F77"
+for v in $COMPILER_VARS; do
+  if [[ -n "${!v+x}" ]]; then eval "SAVED_$v=\"\${$v}\""; else eval "unset SAVED_$v"; fi
+done
 
-if [[ -z "${GH_CUDA:-}" ]]; then
-  if command -v nvcc > /dev/null; then
-    GH_CUDA="$(dirname "$(dirname "$(readlink -f "$(command -v nvcc)")")")"
-  else
-    # nvhpc/25.11 and 26.9 module files select Linux_$(uname -m), but no
-    # Linux_aarch64 tree exists on the login node; check in case it does on gn003.
-    for c in /usr/local/cuda /usr/local/cuda-* /cosma/local/Nvidia-hpc-sdk/*/Linux_aarch64/*/cuda; do
-      if [[ -x "$c/bin/nvcc" ]]; then GH_CUDA="$c"; break; fi
+# a usable CUDA root: nvcc runs on this node, runtime header and library exist
+cuda_ok() {
+  [[ -n "$1" && -x "$1/bin/nvcc" && -f "$1/include/cuda_runtime.h" ]] &&
+    ls "$1"/lib64/libcudart.so* > /dev/null 2>&1 &&
+    "$1/bin/nvcc" --version > /dev/null 2>&1
+}
+# CUDA root for the nvcc on PATH. With nvhpc modules that nvcc is a wrapper in
+# <sdk>/compilers/bin, the toolkit itself is <sdk>/cuda.
+cuda_root_of_path_nvcc() {
+  local r
+  r="$(dirname "$(dirname "$(readlink -f "$(command -v nvcc)")")")"
+  if ! cuda_ok "$r" && [[ -n "${NVHPC_ROOT:-}" ]] && cuda_ok "$NVHPC_ROOT/cuda"; then
+    r="$(readlink -f "$NVHPC_ROOT/cuda")"
+  fi
+  echo "$r"
+}
+
+CUDA_SOURCE=""
+if [[ -n "${GH_CUDA:-}" ]]; then
+  CUDA_SOURCE="GH_CUDA"
+  if [[ -n "${GH_CUDA_MODULE:-}" ]]; then module load "$GH_CUDA_MODULE"; fi
+elif command -v nvcc > /dev/null && cuda_ok "$(cuda_root_of_path_nvcc)"; then
+  GH_CUDA="$(cuda_root_of_path_nvcc)"; CUDA_SOURCE="nvcc on PATH"
+else
+  # 3. modules: plain cuda/<v> and nvhpc/<v>, sorted by version, newest first
+  for m in $(module -t avail 2>&1 | grep -E '^(cuda|nvhpc)/[0-9]' | sed 's/(.*//' |
+    awk -F/ '{print $2" "$0}' | sort -V -r | awk '{print $2}'); do
+    if module load "$m" > /dev/null 2>&1 && command -v nvcc > /dev/null &&
+      cuda_ok "$(cuda_root_of_path_nvcc)"; then
+      GH_CUDA="$(cuda_root_of_path_nvcc)"; GH_CUDA_MODULE="$m"; CUDA_SOURCE="module $m"
+      break
+    fi
+    echo "module $m: no working nvcc"
+    module unload "$m" > /dev/null 2>&1 || true
+  done
+  # 4. system installs
+  if [[ -z "${GH_CUDA:-}" ]]; then
+    for c in /usr/local/cuda $(ls -d /usr/local/cuda-* 2> /dev/null | sort -V -r); do
+      if cuda_ok "$c"; then GH_CUDA="$c"; CUDA_SOURCE="$c"; break; fi
     done
   fi
 fi
-if [[ -z "${GH_CUDA:-}" || ! -x "$GH_CUDA/bin/nvcc" ]]; then
-  echo "no CUDA found (set GH_CUDA=<cuda root>)"
-  ls -d /usr/local/cuda* /opt/nvidia* /cosma/local/Nvidia-hpc-sdk/*/Linux_* 2>&1
-  module -t avail 2>&1 | grep -i -E "cuda|nvhpc" || true
-  exit 1
+for v in $COMPILER_VARS; do
+  sv="SAVED_$v"
+  if [[ -n "${!sv+x}" ]]; then export "$v=${!sv}"; else unset "$v"; fi
+done
+CC="${CC:-cc}"
+# clang/18.1.8arm only sets CC=clang and relies on a clang on the node.
+if ! command -v "$CC" > /dev/null; then
+  echo "WARNING: CC=$CC not found on $(hostname), falling back to gcc"
+  export CC=gcc
 fi
-echo "CUDA: $GH_CUDA ($("$GH_CUDA/bin/nvcc" --version | tail -1))"
+# The code needs OpenMP 5.1 `#pragma omp error` (src/swift_placeholders/error.h);
+# e.g. gcc 11 (RHEL 9 system gcc) does not support it.
+if ! printf '#include <omp.h>\nint main(void){\n#pragma omp error at(execution) severity(fatal) message("x")\nreturn omp_get_max_threads() < 0;}\n' |
+  "$CC" -fopenmp -Werror=unknown-pragmas -x c - -o /dev/null; then
+  echo "ERROR: C compiler '$CC' ($("$CC" --version 2>&1 | head -1)) cannot build an OpenMP" \
+    "program with '#pragma omp error' on $(hostname). Set GH_MODULES to a compiler module" \
+    "that provides clang >= 18 or gcc >= 12 for aarch64 and resubmit."
+  exit 2
+fi
+
+LIKWID_PIN="${LIKWID_PIN:-/cosma/local/likwid/clang_18.1.8arm/5.4.1/bin/likwid-pin}"
+
+env_summary() {
+  echo "=== environment summary ($(date -Is))"
+  echo "host: $(hostname), arch: $(uname -m), job: ${SLURM_JOB_ID:-none}, mode: $MODE, buffer: $BUFFER"
+  echo "repo: $REPO @ $(git -C "$REPO" rev-parse --short HEAD) ($(git -C "$REPO" rev-parse --abbrev-ref HEAD))"
+  echo "--- module list"; module -t list 2>&1
+  echo "--- compiler: CC=$CC ($(command -v "$CC" || echo 'not found'))"
+  "$CC" --version 2>&1 | head -1
+  echo "--- CUDA: ${GH_CUDA:-NOT FOUND} (source: ${CUDA_SOURCE:-none}, module: ${GH_CUDA_MODULE:-none})"
+  if [[ -n "${GH_CUDA:-}" ]]; then
+    echo "nvcc: $GH_CUDA/bin/nvcc"; "$GH_CUDA/bin/nvcc" --version 2>&1 | tail -2
+  fi
+  echo "--- likwid-pin: $LIKWID_PIN ($([[ -x "$LIKWID_PIN" ]] && echo found || echo 'NOT found'))"
+  echo "--- cpu / gpu"; lscpu | grep -E "Architecture|Model name"
+  nvidia-smi -L 2>&1 || true
+  echo "=== end of environment summary"
+}
+env_summary
+
+if [[ -z "${GH_CUDA:-}" ]] || ! cuda_ok "$GH_CUDA"; then
+  echo "ERROR: no working CUDA found on $(hostname). Tried: GH_CUDA, nvcc on PATH" \
+    "after loading '$GH_MODULES', cuda/nvhpc modules, /usr/local/cuda*."
+  echo "Seen:"; ls -d /usr/local/cuda* /opt/nvidia* 2>&1
+  module -t avail 2>&1 | grep -i -E "cuda|nvhpc" || true
+  echo "Set GH_CUDA=<cuda root> (and GH_CUDA_MODULE if a module is needed) and resubmit."
+  exit 2
+fi
+export LD_LIBRARY_PATH="$GH_CUDA/lib64:${LD_LIBRARY_PATH:-}"
 CUDA_FLAG="--cuda $GH_CUDA"
 
 # -march=native as on dine2; clang on aarch64 may only accept -mcpu=native.
 if [[ -z "${MYCFLAGS:-}" ]]; then
-  if echo 'int main(void){return 0;}' | "${CC:-cc}" -march=native -x c - -o /dev/null 2> /dev/null; then
+  if echo 'int main(void){return 0;}' | "$CC" -march=native -x c - -o /dev/null 2> /dev/null; then
     export MYCFLAGS="-march=native"
   else
     export MYCFLAGS="-mcpu=native"
@@ -84,28 +180,38 @@ if [[ -z "${MYCFLAGS:-}" ]]; then
 fi
 echo "MYCFLAGS=$MYCFLAGS"
 
-LIKWID_PIN="${LIKWID_PIN:-/cosma/local/likwid/clang_18.1.8arm/5.4.1/bin/likwid-pin}"
 if [[ "$MODE" == "run" ]]; then
   [[ -x "$LIKWID_PIN" ]] || { echo "likwid-pin not found: $LIKWID_PIN"; exit 1; }
   # check that pinning works on this node before starting the replay
   "$LIKWID_PIN" -c N:0 true || { echo "likwid-pin does not work here"; exit 1; }
 fi
-lscpu | grep -E "Architecture|Model name"
-nvidia-smi -L 2>&1 || true
 
-echo "host: $(hostname) ($(uname -m)), job: ${SLURM_JOB_ID:-none}, mode: $MODE, buffer: $BUFFER"
-echo "repo: $REPO @ $(git -C "$REPO" rev-parse --short HEAD) ($(git -C "$REPO" rev-parse --abbrev-ref HEAD))"
 
 if [[ "$MODE" == "build" ]]; then
 
   BUILDDIR="$RUNDIR/build_${NODE}_${BUFFER}"
   mkdir -p "$BUILDDIR" "$BINDIR"
+  env_summary > "$BUILDDIR/build.log" 2>&1
+  echo "MYCFLAGS=$MYCFLAGS" >> "$BUILDDIR/build.log"
   rsync -a --exclude '/swiftgpupack' --exclude '/swiftgpupack_*' \
     --exclude '/buffer_check' "$REPO/sim/" "$BUILDDIR/sim/"
   "$BUILDDIR/sim/make_buffer_layout_variants.sh" "$NODE" "$BINDIR" \
-    --buffers "$BUFFER" $CUDA_FLAG -j 64 > "$BUILDDIR/build.log" 2>&1 ||
+    --buffers "$BUFFER" $CUDA_FLAG -j 64 >> "$BUILDDIR/build.log" 2>&1 ||
     { tail -50 "$BUILDDIR/build.log"; exit 1; }
-  echo "build done"
+  # 5 splits x 10 layouts unless restricted via SPLITS/LAYOUTS (for tests)
+  n_expected=50
+  if [[ -n "${SPLITS:-}${LAYOUTS:-}" ]]; then
+    n_expected=$(($(echo ${SPLITS:-x x x x x} | wc -w) * $(echo ${LAYOUTS:-x x x x x x x x x x} | wc -w)))
+  fi
+  n=$(ls "$BINDIR"/swiftgpupack_"$NODE"_*_global-var_*_"$BUFFER" 2> /dev/null | wc -l)
+  [[ "$n" -ge "$n_expected" ]] || { echo "ERROR: only $n/$n_expected executables in $BINDIR"; exit 1; }
+  # toolchain for the run jobs
+  {
+    echo "GH_MODULES='$GH_MODULES'"
+    echo "GH_CUDA='$GH_CUDA'"
+    echo "GH_CUDA_MODULE='${GH_CUDA_MODULE:-}'"
+  } > "$TOOLCHAIN_ENV"
+  echo "build done ($n executables), toolchain written to $TOOLCHAIN_ENV"
 
 elif [[ "$MODE" == "run" ]]; then
 
@@ -157,6 +263,8 @@ echo "all done"
 # Submission order used (from the results directory, REPO set):
 #   b=$(sbatch --parsable --export=ALL,MODE=build,BUFFER=aos,REPO=$REPO job_buffer_layouts_gn003.slm)
 #   for d in EAGLE25_72threads Gresho256_72threads EAGLE25_36threads Gresho256_36threads; do
-#     sbatch --dependency=afterok:$b --export=ALL,MODE=run,BUFFER=aos,DIR=$d,REPO=$REPO job_buffer_layouts_gn003.slm
+#     sbatch --dependency=afterok:$b --kill-on-invalid-dep=yes \
+#       --export=ALL,MODE=run,BUFFER=aos,DIR=$d,REPO=$REPO job_buffer_layouts_gn003.slm
 #   done
-# and the same for BUFFER=soa.
+# and the same for BUFFER=soa. A run job that hits the time limit can be
+# resubmitted with the same command (finished runs are skipped).
