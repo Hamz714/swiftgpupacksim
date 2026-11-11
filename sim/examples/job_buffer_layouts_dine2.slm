@@ -23,6 +23,12 @@
 # Results: <submit dir>/dine2_5steps_buffer-<BUFFER>/<dir>_global-var_<split>_noflush/results_<layout>.csv
 # Existing results are not recomputed, so a resubmitted job continues where the
 # previous one stopped.
+#
+# Repeated measurements: RESULT_SUFFIX (e.g. _rep2) is appended to the result
+# and work folders; SKIP_BUILD=1 reuses the executables in bin_dine2 without
+# touching the build directory (fails if one is missing), e.g.
+#
+#   sbatch --export=ALL,BUFFER=soa,REPO=...,RESULT_SUFFIX=_rep2,SKIP_BUILD=1 job_buffer_layouts_dine2.slm
 
 set -e
 
@@ -33,6 +39,8 @@ NODE=dine2
 RUNDIR="${SLURM_SUBMIT_DIR:-$PWD}"
 CUDA=/cosma/local/Nvidia-hpc-sdk/2024_245/Linux_x86_64/24.5/cuda
 DIRS="EAGLE25_64threads Gresho256_64threads"
+RESULT_SUFFIX="${RESULT_SUFFIX:-}"
+SKIP_BUILD="${SKIP_BUILD:-0}"
 
 source "${MODULES_SCRIPT:-/cosma/apps/do015/dc-ibra4/swift_modules.sh}"
 module list
@@ -42,7 +50,7 @@ module list
 LIKWID_PIN="${LIKWID_PIN:-/cosma/local/likwid/gnu_14.1.0/5.5.1/bin/likwid-pin}"
 [[ -x "$LIKWID_PIN" ]] || { echo "likwid-pin not found: $LIKWID_PIN"; exit 1; }
 
-echo "host: $(hostname), job: ${SLURM_JOB_ID:-none}, buffer: $BUFFER"
+echo "host: $(hostname), job: ${SLURM_JOB_ID:-none}, buffer: $BUFFER, suffix: '$RESULT_SUFFIX', skip build: $SKIP_BUILD"
 echo "repo: $REPO @ $(git -C "$REPO" rev-parse --short HEAD) ($(git -C "$REPO" rev-parse --abbrev-ref HEAD))"
 lscpu | grep "Model name"
 
@@ -52,21 +60,27 @@ lscpu | grep "Model name"
 # ---------------------------------------------------------------------------
 BUILDDIR="$RUNDIR/build_${NODE}_${BUFFER}"
 BINDIR="$RUNDIR/bin_${NODE}"
-mkdir -p "$BUILDDIR" "$BINDIR"
-rsync -a --exclude '/swiftgpupack' --exclude '/swiftgpupack_*' \
-  --exclude '/buffer_check' "$REPO/sim/" "$BUILDDIR/sim/"
-"$BUILDDIR/sim/make_buffer_layout_variants.sh" "$NODE" "$BINDIR" \
-  --buffers "$BUFFER" --cuda "$CUDA" -j 32 > "$BUILDDIR/build.log" 2>&1 ||
-  { tail -50 "$BUILDDIR/build.log"; exit 1; }
-echo "build done"
+if [[ "$SKIP_BUILD" == "1" ]]; then
+  n=$(ls "$BINDIR"/swiftgpupack_"$NODE"_*_global-var_*_"$BUFFER" 2> /dev/null | wc -l)
+  [[ "$n" -eq 50 ]] || { echo "SKIP_BUILD=1 but found $n/50 executables in $BINDIR"; exit 1; }
+  echo "reusing $n executables in $BINDIR"
+else
+  mkdir -p "$BUILDDIR" "$BINDIR"
+  rsync -a --exclude '/swiftgpupack' --exclude '/swiftgpupack_*' \
+    --exclude '/buffer_check' "$REPO/sim/" "$BUILDDIR/sim/"
+  "$BUILDDIR/sim/make_buffer_layout_variants.sh" "$NODE" "$BINDIR" \
+    --buffers "$BUFFER" --cuda "$CUDA" -j 32 > "$BUILDDIR/build.log" 2>&1 ||
+    { tail -50 "$BUILDDIR/build.log"; exit 1; }
+  echo "build done"
+fi
 
 # ---------------------------------------------------------------------------
 # Runs
 # ---------------------------------------------------------------------------
 export OMP_PROC_BIND=true
 
-RESDIR="$RUNDIR/${NODE}_5steps_buffer-${BUFFER}"
-WORKDIR="$RUNDIR/work_${NODE}_${BUFFER}"
+RESDIR="$RUNDIR/${NODE}_5steps_buffer-${BUFFER}${RESULT_SUFFIX}"
+WORKDIR="$RUNDIR/work_${NODE}_${BUFFER}${RESULT_SUFFIX}"
 mkdir -p "$RESDIR" "$WORKDIR"
 cd "$WORKDIR"
 rm -f results_*.csv
