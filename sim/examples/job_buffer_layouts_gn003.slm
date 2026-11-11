@@ -1,0 +1,158 @@
+#!/usr/bin/bash -l
+
+#SBATCH --job-name buf-gh
+#SBATCH --time 06:00:00
+#SBATCH --partition gracehopper
+#SBATCH --account do016
+#SBATCH --exclusive
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=72
+#SBATCH --output buf-gh_%x_%j.out
+
+# GPU transfer buffer layout comparison on Grace Hopper (gn003, aarch64),
+# global-var particle access.
+#
+# The gracehopper partition has a 6 h time limit, so the work is split into
+# separate jobs selected by MODE:
+#
+#   MODE=build  build all executables for BUFFER on the node (-march=native)
+#   MODE=run    replay the 5-step logs of experiment DIR for BUFFER
+#
+# Both are resumable: existing executables and results are skipped, so a job
+# that hits the time limit can simply be resubmitted. Submit from the directory
+# where results should go, e.g. (see the end of this file):
+#
+#   sbatch --export=ALL,MODE=build,BUFFER=soa,REPO=/path/to/swiftgpupacksim job_buffer_layouts_gn003.slm
+#   sbatch --export=ALL,MODE=run,BUFFER=soa,DIR=EAGLE25_72threads,REPO=... job_buffer_layouts_gn003.slm
+#
+# Results: <submit dir>/gn003_5steps_buffer-<BUFFER>/<DIR>_global-var_<split>_noflush/results_<layout>.csv
+
+set -e
+
+: "${MODE:?set MODE=build or MODE=run}"
+: "${BUFFER:?set BUFFER=aos or BUFFER=soa}"
+: "${REPO:?set REPO to the swiftgpupacksim repository root}"
+
+NODE=gn003
+# logs were recorded on gn002
+DATANODE=gn002
+RUNDIR="${SLURM_SUBMIT_DIR:-$PWD}"
+BINDIR="$RUNDIR/bin_${NODE}"
+
+# Modules / toolchain. No module collection for Grace Hopper is available to
+# us (the original job uses the supervisor's `module restore gpu_swift_gn002`),
+# and /cosma/local has no aarch64 CUDA. So:
+#   compiler: GH_MODULES (default: the clang module meant for Grace nodes)
+#   CUDA:     GH_CUDA if set, else nvcc on PATH, else /usr/local/cuda
+#             (+ /usr/local/cuda-*). The job fails if none is found, rather
+#             than silently building without cudaMallocHost.
+#   pinning:  likwid-pin (ARM build) by path, as in the dine2 job.
+GH_MODULES="${GH_MODULES:-clang/18.1.8arm}"
+module purge
+for m in $GH_MODULES; do module load "$m"; done
+module list 2>&1
+echo "CC=${CC:-unset} ($(command -v "${CC:-cc}"))"; "${CC:-cc}" --version | head -1
+
+if [[ -z "${GH_CUDA:-}" ]]; then
+  if command -v nvcc > /dev/null; then
+    GH_CUDA="$(dirname "$(dirname "$(readlink -f "$(command -v nvcc)")")")"
+  else
+    for c in /usr/local/cuda /usr/local/cuda-*; do
+      if [[ -x "$c/bin/nvcc" ]]; then GH_CUDA="$c"; break; fi
+    done
+  fi
+fi
+if [[ -z "${GH_CUDA:-}" || ! -x "$GH_CUDA/bin/nvcc" ]]; then
+  echo "no CUDA found (set GH_CUDA=<cuda root>)"; ls -d /usr/local/cuda* /opt/nvidia* 2>&1
+  exit 1
+fi
+echo "CUDA: $GH_CUDA ($("$GH_CUDA/bin/nvcc" --version | tail -1))"
+CUDA_FLAG="--cuda $GH_CUDA"
+
+# -march=native as on dine2; clang on aarch64 may only accept -mcpu=native.
+if [[ -z "${MYCFLAGS:-}" ]]; then
+  if echo 'int main(void){return 0;}' | "${CC:-cc}" -march=native -x c - -o /dev/null 2> /dev/null; then
+    export MYCFLAGS="-march=native"
+  else
+    export MYCFLAGS="-mcpu=native"
+  fi
+fi
+echo "MYCFLAGS=$MYCFLAGS"
+
+LIKWID_PIN="${LIKWID_PIN:-/cosma/local/likwid/clang_18.1.8arm/5.4.1/bin/likwid-pin}"
+if [[ "$MODE" == "run" ]]; then
+  [[ -x "$LIKWID_PIN" ]] || { echo "likwid-pin not found: $LIKWID_PIN"; exit 1; }
+  # check that pinning works on this node before starting the replay
+  "$LIKWID_PIN" -c N:0 true || { echo "likwid-pin does not work here"; exit 1; }
+fi
+lscpu | grep -E "Architecture|Model name"
+nvidia-smi -L 2>&1 || true
+
+echo "host: $(hostname) ($(uname -m)), job: ${SLURM_JOB_ID:-none}, mode: $MODE, buffer: $BUFFER"
+echo "repo: $REPO @ $(git -C "$REPO" rev-parse --short HEAD) ($(git -C "$REPO" rev-parse --abbrev-ref HEAD))"
+
+if [[ "$MODE" == "build" ]]; then
+
+  BUILDDIR="$RUNDIR/build_${NODE}_${BUFFER}"
+  mkdir -p "$BUILDDIR" "$BINDIR"
+  rsync -a --exclude '/swiftgpupack' --exclude '/swiftgpupack_*' \
+    --exclude '/buffer_check' "$REPO/sim/" "$BUILDDIR/sim/"
+  "$BUILDDIR/sim/make_buffer_layout_variants.sh" "$NODE" "$BINDIR" \
+    --buffers "$BUFFER" $CUDA_FLAG -j 64 > "$BUILDDIR/build.log" 2>&1 ||
+    { tail -50 "$BUILDDIR/build.log"; exit 1; }
+  echo "build done"
+
+elif [[ "$MODE" == "run" ]]; then
+
+  : "${DIR:?set DIR to the experiment directory, e.g. EAGLE25_72threads}"
+
+  export OMP_PROC_BIND=true
+  NTHREADS=36
+  if [[ "$DIR" == *"_72thread"* ]]; then NTHREADS=72; fi
+  export OMP_NUM_THREADS=$NTHREADS
+
+  RESDIR="$RUNDIR/${NODE}_5steps_buffer-${BUFFER}"
+  WORKDIR="$RUNDIR/work_${NODE}_${BUFFER}_${DIR}"
+  mkdir -p "$RESDIR" "$WORKDIR"
+  cd "$WORKDIR"
+  rm -f results_*.csv
+
+  part_access="global-var"
+
+  for loop in "none" "by-struct" "by-element" "by-type" "by-struct-and-type"; do
+
+    outdir="$RESDIR"/"$DIR"_"$part_access"_"$loop"_noflush
+    mkdir -p "$outdir"
+
+    for layout in aos soa upstream pack-gradient pack-force pack-shared pack-force-type random-order pack-gradient-type pack-shared-type; do
+
+      outfile="$outdir"/results_"$layout".csv
+      if [[ -f "$outfile" ]]; then
+        echo "found $outfile, not rerunning"
+        continue
+      fi
+
+      ex="$BINDIR"/swiftgpupack_"$NODE"_"$layout"_"$part_access"_"$loop"_"$BUFFER"
+      echo "running $ex on $DIR"
+      "$LIKWID_PIN" --quiet -c N:0-"$((NTHREADS - 1))" \
+        "$ex" -s 5 --noflush "$REPO/data/$DATANODE/$DIR"
+      mv results_"$layout".csv "$outfile"
+      echo "written $outfile"
+
+    done
+  done
+
+else
+  echo "unknown MODE '$MODE'"
+  exit 1
+fi
+
+echo "all done"
+
+# Submission order used (from the results directory, REPO set):
+#   b=$(sbatch --parsable --export=ALL,MODE=build,BUFFER=aos,REPO=$REPO job_buffer_layouts_gn003.slm)
+#   for d in EAGLE25_72threads Gresho256_72threads EAGLE25_36threads Gresho256_36threads; do
+#     sbatch --dependency=afterok:$b --export=ALL,MODE=run,BUFFER=aos,DIR=$d,REPO=$REPO job_buffer_layouts_gn003.slm
+#   done
+# and the same for BUFFER=soa.
