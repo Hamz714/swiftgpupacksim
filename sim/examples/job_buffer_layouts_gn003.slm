@@ -58,13 +58,17 @@ if [[ -z "${GH_CUDA:-}" ]]; then
   if command -v nvcc > /dev/null; then
     GH_CUDA="$(dirname "$(dirname "$(readlink -f "$(command -v nvcc)")")")"
   else
-    for c in /usr/local/cuda /usr/local/cuda-*; do
+    # nvhpc/25.11 and 26.9 module files select Linux_$(uname -m), but no
+    # Linux_aarch64 tree exists on the login node; check in case it does on gn003.
+    for c in /usr/local/cuda /usr/local/cuda-* /cosma/local/Nvidia-hpc-sdk/*/Linux_aarch64/*/cuda; do
       if [[ -x "$c/bin/nvcc" ]]; then GH_CUDA="$c"; break; fi
     done
   fi
 fi
 if [[ -z "${GH_CUDA:-}" || ! -x "$GH_CUDA/bin/nvcc" ]]; then
-  echo "no CUDA found (set GH_CUDA=<cuda root>)"; ls -d /usr/local/cuda* /opt/nvidia* 2>&1
+  echo "no CUDA found (set GH_CUDA=<cuda root>)"
+  ls -d /usr/local/cuda* /opt/nvidia* /cosma/local/Nvidia-hpc-sdk/*/Linux_* 2>&1
+  module -t avail 2>&1 | grep -i -E "cuda|nvhpc" || true
   exit 1
 fi
 echo "CUDA: $GH_CUDA ($("$GH_CUDA/bin/nvcc" --version | tail -1))"
