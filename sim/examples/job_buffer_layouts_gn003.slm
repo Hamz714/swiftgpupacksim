@@ -18,6 +18,7 @@
 #
 #   MODE=build  build all executables for BUFFER on the node (-march=native)
 #   MODE=run    replay the 5-step logs of experiment DIR for BUFFER
+#   MODE=env    only select and print the toolchain (exit 2 if incomplete)
 #
 # Both are resumable: existing executables and results are skipped, so a job
 # that hits the time limit can simply be resubmitted. Submit from the directory
@@ -26,7 +27,15 @@
 #   sbatch --export=ALL,MODE=build,BUFFER=soa,REPO=/path/to/swiftgpupacksim job_buffer_layouts_gn003.slm
 #   sbatch --export=ALL,MODE=run,BUFFER=soa,DIR=EAGLE25_72threads,REPO=... job_buffer_layouts_gn003.slm
 #
-# Results: <submit dir>/gn003_5steps_buffer-<BUFFER>/<DIR>_global-var_<split>_noflush/results_<layout>.csv
+# Results: <submit dir>/<NODE>_5steps_buffer-<BUFFER>/<DIR>_global-var_<split>_noflush/results_<layout>.csv
+#
+# Without Slurm (e.g. on gn002, see run_gn002.sh): set NODE=gn002 and run the
+# script with `bash -l` from the results directory. NODE names the executables,
+# build, work and result folders, so results of different nodes never mix; it
+# must match the host name (ALLOW_NODE_MISMATCH=1 for tests only).
+# Optional: LOAD_LOG=<file> appends a load snapshot (uptime, top 5 processes,
+# GPU compute apps) before and after every run; STATUS_FILE=<file> gets a
+# `last_finished_run=` line after every run.
 
 set -e
 
@@ -34,7 +43,11 @@ set -e
 : "${BUFFER:?set BUFFER=aos or BUFFER=soa}"
 : "${REPO:?set REPO to the swiftgpupacksim repository root}"
 
-NODE=gn003
+NODE="${NODE:-gn003}"
+if [[ "$(hostname -s)" != "$NODE" && "${ALLOW_NODE_MISMATCH:-0}" != "1" ]]; then
+  echo "ERROR: NODE=$NODE but running on $(hostname -s)"
+  exit 2
+fi
 # logs were recorded on gn002
 DATANODE=gn002
 RUNDIR="${SLURM_SUBMIT_DIR:-$PWD}"
@@ -153,7 +166,22 @@ if [[ "$MODE" == "run" ]]; then
 fi
 
 
-if [[ "$MODE" == "build" ]]; then
+load_snapshot() {
+  [[ -n "${LOAD_LOG:-}" ]] || return 0
+  {
+    echo "=== $(date -Is) $1"
+    uptime
+    ps -eo user,pcpu,pmem,etime,comm --sort=-pcpu | head -6
+    nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv 2>&1
+  } >> "$LOAD_LOG"
+}
+
+if [[ "$MODE" == "env" ]]; then
+
+  [[ -n "${LIKWID_PIN:-}" ]] || { echo "ERROR: no native likwid-pin found"; exit 2; }
+  echo "toolchain OK"
+
+elif [[ "$MODE" == "build" ]]; then
 
   BUILDDIR="$RUNDIR/build_${NODE}_${BUFFER}"
   mkdir -p "$BUILDDIR" "$BINDIR"
@@ -211,10 +239,16 @@ elif [[ "$MODE" == "run" ]]; then
 
       ex="$BINDIR"/swiftgpupack_"$NODE"_"$layout"_"$part_access"_"$loop"_"$BUFFER"
       echo "running $ex on $DIR"
+      load_snapshot "before $DIR $loop $layout $BUFFER"
       "$LIKWID_PIN" --quiet -c N:0-"$((NTHREADS - 1))" \
         "$ex" -s 5 --noflush "$REPO/data/$DATANODE/$DIR"
+      load_snapshot "after $DIR $loop $layout $BUFFER"
       mv results_"$layout".csv "$outfile"
       echo "written $outfile"
+      if [[ -n "${STATUS_FILE:-}" ]]; then
+        sed -i '/^last_finished_run=/d' "$STATUS_FILE"
+        echo "last_finished_run=$(date -Is) $outfile" >> "$STATUS_FILE"
+      fi
 
     done
   done
