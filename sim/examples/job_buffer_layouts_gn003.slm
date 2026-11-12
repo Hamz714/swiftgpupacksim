@@ -47,17 +47,15 @@ BINDIR="$RUNDIR/bin_${NODE}"
 #             which only sets CC=clang; falls back to gcc if there is no clang).
 #             It must support OpenMP 5.1 `omp error` (clang >= 18, gcc >= 12),
 #             otherwise the job stops with exit code 2.
-#   CUDA, first match wins:
-#     1. GH_CUDA (CUDA root) if set
-#     2. nvcc on PATH after loading GH_MODULES
-#     3. cuda/* and nvhpc/* modules from `module avail` on the node, newest
-#        version first; the first one whose nvcc runs here is kept
-#     4. /usr/local/cuda, /usr/local/cuda-* (newest first)
-#   If nothing is found the job stops with exit code 2 (no fallback to
+#   CUDA and likwid-pin: selected by sim/examples/gh_toolchain.sh (read from
+#             $REPO at job start). The login environment exported by Slurm
+#             contains x86_64 modules (e.g. an x86_64 nvcc on PATH), so after
+#             `module purge` x86_64 PATH entries are dropped, and candidates are
+#             accepted only if they are native binaries that run. CUDA order:
+#             GH_CUDA, /usr/local/cuda-13.0, /usr/local/cuda (resolved), newest
+#             /usr/local/cuda-*, cuda/nvhpc modules (newest first).
+#   If no CUDA is found the job stops with exit code 2 (no fallback to
 #   building without cudaMallocHost, which would time a different code path).
-# The build job writes its choice to $BINDIR/toolchain_<BUFFER>.env; run jobs
-# load exactly that (libcudart is linked dynamically).
-#   pinning: likwid-pin (ARM build) by path, as in the dine2 job.
 # ---------------------------------------------------------------------------
 TOOLCHAIN_ENV="$BINDIR/toolchain_${BUFFER}.env"
 if [[ "$MODE" == "run" ]]; then
@@ -67,8 +65,12 @@ if [[ "$MODE" == "run" ]]; then
   source "$TOOLCHAIN_ENV"
 fi
 
+# shellcheck disable=SC1091
+source "$REPO/sim/examples/gh_toolchain.sh"
+
 GH_MODULES="${GH_MODULES:-clang/18.1.8arm}"
 module purge
+gh_strip_foreign_paths
 for m in $GH_MODULES; do module load "$m"; done
 # cuda/nvhpc modules set CC (and CXX, CPP, FC, ...) to their own compilers;
 # keep what GH_MODULES set up and restore it after loading CUDA.
@@ -77,48 +79,7 @@ for v in $COMPILER_VARS; do
   if [[ -n "${!v+x}" ]]; then eval "SAVED_$v=\"\${$v}\""; else eval "unset SAVED_$v"; fi
 done
 
-# a usable CUDA root: nvcc runs on this node, runtime header and library exist
-cuda_ok() {
-  [[ -n "$1" && -x "$1/bin/nvcc" && -f "$1/include/cuda_runtime.h" ]] &&
-    ls "$1"/lib64/libcudart.so* > /dev/null 2>&1 &&
-    "$1/bin/nvcc" --version > /dev/null 2>&1
-}
-# CUDA root for the nvcc on PATH. With nvhpc modules that nvcc is a wrapper in
-# <sdk>/compilers/bin, the toolkit itself is <sdk>/cuda.
-cuda_root_of_path_nvcc() {
-  local r
-  r="$(dirname "$(dirname "$(readlink -f "$(command -v nvcc)")")")"
-  if ! cuda_ok "$r" && [[ -n "${NVHPC_ROOT:-}" ]] && cuda_ok "$NVHPC_ROOT/cuda"; then
-    r="$(readlink -f "$NVHPC_ROOT/cuda")"
-  fi
-  echo "$r"
-}
-
-CUDA_SOURCE=""
-if [[ -n "${GH_CUDA:-}" ]]; then
-  CUDA_SOURCE="GH_CUDA"
-  if [[ -n "${GH_CUDA_MODULE:-}" ]]; then module load "$GH_CUDA_MODULE"; fi
-elif command -v nvcc > /dev/null && cuda_ok "$(cuda_root_of_path_nvcc)"; then
-  GH_CUDA="$(cuda_root_of_path_nvcc)"; CUDA_SOURCE="nvcc on PATH"
-else
-  # 3. modules: plain cuda/<v> and nvhpc/<v>, sorted by version, newest first
-  for m in $(module -t avail 2>&1 | grep -E '^(cuda|nvhpc)/[0-9]' | sed 's/(.*//' |
-    awk -F/ '{print $2" "$0}' | sort -V -r | awk '{print $2}'); do
-    if module load "$m" > /dev/null 2>&1 && command -v nvcc > /dev/null &&
-      cuda_ok "$(cuda_root_of_path_nvcc)"; then
-      GH_CUDA="$(cuda_root_of_path_nvcc)"; GH_CUDA_MODULE="$m"; CUDA_SOURCE="module $m"
-      break
-    fi
-    echo "module $m: no working nvcc"
-    module unload "$m" > /dev/null 2>&1 || true
-  done
-  # 4. system installs
-  if [[ -z "${GH_CUDA:-}" ]]; then
-    for c in /usr/local/cuda $(ls -d /usr/local/cuda-* 2> /dev/null | sort -V -r); do
-      if cuda_ok "$c"; then GH_CUDA="$c"; CUDA_SOURCE="$c"; break; fi
-    done
-  fi
-fi
+gh_find_cuda || true
 for v in $COMPILER_VARS; do
   sv="SAVED_$v"
   if [[ -n "${!sv+x}" ]]; then export "$v=${!sv}"; else unset "$v"; fi
@@ -139,7 +100,7 @@ if ! printf '#include <omp.h>\nint main(void){\n#pragma omp error at(execution) 
   exit 2
 fi
 
-LIKWID_PIN="${LIKWID_PIN:-/cosma/local/likwid/clang_18.1.8arm/5.4.1/bin/likwid-pin}"
+gh_find_likwid_pin || true
 
 env_summary() {
   echo "=== environment summary ($(date -Is))"
@@ -151,17 +112,22 @@ env_summary() {
   echo "--- CUDA: ${GH_CUDA:-NOT FOUND} (source: ${CUDA_SOURCE:-none}, module: ${GH_CUDA_MODULE:-none})"
   if [[ -n "${GH_CUDA:-}" ]]; then
     echo "nvcc: $GH_CUDA/bin/nvcc"; "$GH_CUDA/bin/nvcc" --version 2>&1 | tail -2
+    file -L "$GH_CUDA/bin/nvcc"
   fi
-  echo "--- likwid-pin: $LIKWID_PIN ($([[ -x "$LIKWID_PIN" ]] && echo found || echo 'NOT found'))"
+  echo "--- likwid-pin: ${LIKWID_PIN:-NOT FOUND}"
+  if [[ -n "${LIKWID_PIN:-}" ]]; then
+    "$LIKWID_PIN" -v 2>&1 | grep -i version | head -1
+    file -L "$(dirname "$(readlink -f "$LIKWID_PIN")")/likwid-lua"
+  fi
   echo "--- cpu / gpu"; lscpu | grep -E "Architecture|Model name"
   nvidia-smi -L 2>&1 || true
   echo "=== end of environment summary"
 }
 env_summary
 
-if [[ -z "${GH_CUDA:-}" ]] || ! cuda_ok "$GH_CUDA"; then
-  echo "ERROR: no working CUDA found on $(hostname). Tried: GH_CUDA, nvcc on PATH" \
-    "after loading '$GH_MODULES', cuda/nvhpc modules, /usr/local/cuda*."
+if [[ -z "${GH_CUDA:-}" ]] || ! gh_cuda_ok "$GH_CUDA"; then
+  echo "ERROR: no working native CUDA found on $(hostname) ($(gh_arch)). Tried: GH_CUDA," \
+    "/usr/local/cuda-13.0, /usr/local/cuda, /usr/local/cuda-*, cuda/nvhpc modules."
   echo "Seen:"; ls -d /usr/local/cuda* /opt/nvidia* 2>&1
   module -t avail 2>&1 | grep -i -E "cuda|nvhpc" || true
   echo "Set GH_CUDA=<cuda root> (and GH_CUDA_MODULE if a module is needed) and resubmit."
@@ -181,7 +147,7 @@ fi
 echo "MYCFLAGS=$MYCFLAGS"
 
 if [[ "$MODE" == "run" ]]; then
-  [[ -x "$LIKWID_PIN" ]] || { echo "likwid-pin not found: $LIKWID_PIN"; exit 1; }
+  [[ -n "${LIKWID_PIN:-}" ]] || { echo "ERROR: no native likwid-pin found"; exit 1; }
   # check that pinning works on this node before starting the replay
   "$LIKWID_PIN" -c N:0 true || { echo "likwid-pin does not work here"; exit 1; }
 fi
