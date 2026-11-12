@@ -59,6 +59,13 @@ parser.add_argument(
 )
 parser.add_argument("--png", action="store_true", help="write .png instead of .pdf")
 parser.add_argument(
+    "-l",
+    "--label",
+    default=None,
+    help="node label used in titles and summary headers (default: node name), "
+    'e.g. "gn002 (shared node)"',
+)
+parser.add_argument(
     "-s",
     "--suffix",
     default="",
@@ -95,6 +102,7 @@ OTHER_VARIANT = "noflush"
 
 
 SUFFIX = ""
+LABEL = None
 
 
 def read_results(srcdir, node, experiment, nthreads):
@@ -194,7 +202,7 @@ def plot_experiment(results, node, experiment, nthreads, outdir, png):
         fontsize=11,
     )
     fig.suptitle(
-        f"{node}, {experiment}, {nthreads} threads, global-var access", y=1.03
+        f"{LABEL or node}, {experiment}, {nthreads} threads, global-var access", y=1.03
     )
     fig.tight_layout(rect=(0, 0, 1, 0.96))
 
@@ -214,7 +222,7 @@ def write_summary(results, node, experiment, nthreads, outdir):
     relative times.
     """
     lines = [
-        f"# {node} {experiment} {nthreads} threads, global-var access",
+        f"# {LABEL or node} {experiment} {nthreads} threads, global-var access",
         "# total = sum of pack+unpack over density, gradient, force",
         "# rel = total / total(soa particles, soa buffers, same split)",
         "# buf_ratio = total(aos buffers) / total(soa buffers), same layout+split",
@@ -268,6 +276,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     SUFFIX = args.suffix
+    LABEL = args.label
     if args.no_tex:
         matplotlib.rcParams["text.usetex"] = False
     os.makedirs(args.outdir, exist_ok=True)
